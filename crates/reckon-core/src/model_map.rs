@@ -10,6 +10,12 @@ pub fn canonical(source: Source, raw: &str, provider: Option<&str>) -> ModelSlug
         if let Some(slug) = openai_canonical(raw) {
             return slug;
         }
+    } else if source == Source::Gemini {
+        if let Some(slug) = gemini_canonical(raw) {
+            return slug;
+        }
+    } else if source == Source::OpenCode && let Some(p) = provider {
+        return opencode_canonical(p, raw);
     } else if source == Source::Pi && let Some(p) = provider {
         return pi_canonical(p, raw);
     }
@@ -44,6 +50,29 @@ fn openai_canonical(raw: &str) -> Option<ModelSlug> {
         }
     }
     None
+}
+
+fn gemini_canonical(raw: &str) -> Option<ModelSlug> {
+    let families: &[(&str, &str)] = &[
+        ("gemini-2.5-pro", "google/gemini-2.5-pro"),
+        ("gemini-2.5-flash", "google/gemini-2.5-flash"),
+        ("gemini-1.5-pro", "google/gemini-1.5-pro"),
+        ("gemini-1.5-flash", "google/gemini-1.5-flash"),
+    ];
+    for &(prefix, canonical) in families {
+        if raw == prefix || raw.starts_with(&format!("{prefix}-")) {
+            return Some(ModelSlug(canonical.into()));
+        }
+    }
+    None
+}
+
+fn opencode_canonical(provider: &str, raw: &str) -> ModelSlug {
+    if raw.contains('/') {
+        ModelSlug(raw.into())
+    } else {
+        ModelSlug(format!("{provider}/{raw}"))
+    }
 }
 
 fn pi_canonical(provider: &str, raw: &str) -> ModelSlug {
@@ -169,5 +198,41 @@ mod tests {
     fn openrouter_slug_passes_through() {
         let slug = canonical(Source::OpenRouter, "google/gemini-2.5-pro", None);
         assert_eq!(slug.as_str(), "google/gemini-2.5-pro");
+    }
+
+    #[test]
+    fn gemini_2_5_pro() {
+        let slug = canonical(Source::Gemini, "gemini-2.5-pro", None);
+        assert_eq!(slug.as_str(), "google/gemini-2.5-pro");
+    }
+
+    #[test]
+    fn gemini_2_5_flash_with_suffix() {
+        let slug = canonical(Source::Gemini, "gemini-2.5-flash-exp-04101", None);
+        assert_eq!(slug.as_str(), "google/gemini-2.5-flash");
+    }
+
+    #[test]
+    fn gemini_1_5_pro_with_suffix() {
+        let slug = canonical(Source::Gemini, "gemini-1.5-pro-002", None);
+        assert_eq!(slug.as_str(), "google/gemini-1.5-pro");
+    }
+
+    #[test]
+    fn opencode_slashed_model_id() {
+        let slug = canonical(Source::OpenCode, "openai/gpt-5.2", Some("openrouter"));
+        assert_eq!(slug.as_str(), "openai/gpt-5.2");
+    }
+
+    #[test]
+    fn opencode_bare_model_id_with_provider() {
+        let slug = canonical(Source::OpenCode, "claude-opus-4.7", Some("anthropic"));
+        assert_eq!(slug.as_str(), "anthropic/claude-opus-4.7");
+    }
+
+    #[test]
+    fn opencode_without_provider_passes_through() {
+        let slug = canonical(Source::OpenCode, "gpt-5.2", None);
+        assert_eq!(slug.as_str(), "gpt-5.2");
     }
 }
