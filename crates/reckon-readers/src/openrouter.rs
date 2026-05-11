@@ -1,9 +1,111 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs};
 
-use asupersync::http::h1::http_client::HttpClient;
+use asupersync::http::h1::http_client::{ClientError, HttpClient};
+use asupersync::http::h1::types::Response;
 use asupersync::http::HttpClientBuilder;
 use serde::Deserialize;
+
+const OPENROUTER_AUTH_ERROR_MESSAGE: &str =
+    "OpenRouter rejected this key ({}). The /activity or /credits endpoint requires a Management API key, not an inference key. Create one at https://openrouter.ai/settings/keys under Management Keys.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenRouterErrorKind {
+    /// Authentication failure (HTTP 401).
+    Auth,
+    /// Network-transport failure while contacting OpenRouter.
+    Network,
+    /// HTTP error from OpenRouter (all non-401 status codes).
+    Upstream,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenRouterExitCode {
+    /// No error (success).
+    Success,
+    /// Auth error (OpenRouter key not accepted as management key).
+    Auth,
+    /// Network failure while making OpenRouter request.
+    Network,
+    /// Other CLI/runtime failure.
+    Other,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenRouterError {
+    pub kind: OpenRouterErrorKind,
+    pub status: Option<u16>,
+    pub message: String,
+}
+
+impl OpenRouterExitCode {
+    /// Return the process exit code used by CLI users.
+    #[must_use]
+    pub const fn as_i32(self) -> i32 {
+        match self {
+            Self::Success => 0,
+            Self::Auth => 2,
+            Self::Network => 3,
+            Self::Other => 1,
+        }
+    }
+}
+
+impl OpenRouterError {
+    #[must_use]
+    const fn new(kind: OpenRouterErrorKind, status: Option<u16>, message: String) -> Self {
+        Self { kind, status, message }
+    }
+
+    /// Return the exit code corresponding to this error.
+    #[must_use]
+    pub fn exit_code(&self) -> OpenRouterExitCode {
+        match self.kind {
+            OpenRouterErrorKind::Auth => OpenRouterExitCode::Auth,
+            OpenRouterErrorKind::Network => OpenRouterExitCode::Network,
+            OpenRouterErrorKind::Upstream => OpenRouterExitCode::Other,
+        }
+    }
+}
+
+/// Build the management-key guidance message for a rejected key.
+#[must_use]
+pub fn management_api_key_error(key: &str) -> String {
+    OPENROUTER_AUTH_ERROR_MESSAGE.replace("{}", &mask_key(key))
+}
+
+/// Translate an HTTP response from OpenRouter into an actionable error.
+///
+/// Returns `None` for 2xx responses.
+#[must_use]
+pub fn classify_openrouter_response(key: &str, response: &Response) -> Option<OpenRouterError> {
+    if response.is_success() {
+        return None;
+    }
+
+    if response.status == 401 {
+        Some(OpenRouterError::new(
+            OpenRouterErrorKind::Auth,
+            Some(response.status),
+            management_api_key_error(key),
+        ))
+    } else {
+        let body = response
+            .text()
+            .map_or_else(|_| "".to_owned(), |body| body.to_string());
+        Some(OpenRouterError::new(
+            OpenRouterErrorKind::Upstream,
+            Some(response.status),
+            body,
+        ))
+    }
+}
+
+/// Translate a transport error while contacting OpenRouter.
+#[must_use]
+pub fn classify_openrouter_network_error(error: &ClientError) -> OpenRouterError {
+    OpenRouterError::new(OpenRouterErrorKind::Network, None, error.to_string())
+}
 
 /// Create an HTTP client configured for use with the `OpenRouter` API.
 ///
@@ -151,5 +253,59 @@ mod tests {
     #[test]
     fn mask_key_exactly_four_chars() {
         assert_eq!(mask_key("1234"), "sk-or-...1234");
+    }
+
+    #[test]
+    fn auth_error_message_masks_key_and_uses_exit_code_two() {
+        let response = Response::new(401, "", "Unauthorized");
+        let error = classify_openrouter_response("sk-or-supersecretABCD", &response)
+            .expect("expected auth error");
+
+        assert_eq!(error.kind, OpenRouterErrorKind::Auth);
+        assert_eq!(error.status, Some(401));
+        assert_eq!(error.exit_code(), OpenRouterExitCode::Auth);
+        assert_eq!(error.exit_code().as_i32(), 2);
+        assert_eq!(
+            error.message,
+            "OpenRouter rejected this key (sk-or-...ABCD). The /activity or /credits endpoint requires a Management API key, not an inference key. Create one at https://openrouter.ai/settings/keys under Management Keys."
+        );
+        assert!(!error.message.contains("supersecret"));
+    }
+
+    #[test]
+    fn non_auth_http_error_passes_response_body_and_exit_code_one() {
+        let response = Response::new(403, "", "forbidden by server");
+        let error = classify_openrouter_response("sk-or-reckon", &response)
+            .expect("expected upstream error");
+
+        assert_eq!(error.kind, OpenRouterErrorKind::Upstream);
+        assert_eq!(error.status, Some(403));
+        assert_eq!(error.exit_code(), OpenRouterExitCode::Other);
+        assert_eq!(error.exit_code().as_i32(), 1);
+        assert_eq!(error.message, "forbidden by server");
+    }
+
+    #[test]
+    fn non_auth_429_http_error_is_treated_as_other_exit_code() {
+        let response = Response::new(429, "", "rate limited");
+        let error = classify_openrouter_response("sk-or-reckon", &response)
+            .expect("expected upstream error");
+
+        assert_eq!(error.status, Some(429));
+        assert_eq!(error.exit_code(), OpenRouterExitCode::Other);
+        assert_eq!(error.message, "rate limited");
+    }
+
+    #[test]
+    fn network_error_is_exit_code_three() {
+        let error = classify_openrouter_network_error(&ClientError::DnsError(std::io::Error::other(
+            "dns lookup failed",
+        )));
+
+        assert_eq!(error.kind, OpenRouterErrorKind::Network);
+        assert_eq!(error.status, None);
+        assert_eq!(error.exit_code(), OpenRouterExitCode::Network);
+        assert_eq!(error.exit_code().as_i32(), 3);
+        assert_eq!(error.message, "DNS resolution failed: dns lookup failed");
     }
 }
