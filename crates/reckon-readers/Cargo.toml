@@ -7,7 +7,7 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-asupersync = { version = "0.2", features = ["proc-macros"] }
+asupersync = { version = "0.2", features = ["proc-macros", "tls-webpki-roots"] }
 async-trait = "0.1"
 futures = "0.3"
 reckon-core = { path = "../reckon-core" }
@@ -15,6 +15,7 @@ regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = { version = "1", features = ["parse"] }
 
 [dev-dependencies]
 filetime = "0.2"
