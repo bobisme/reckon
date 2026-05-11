@@ -5,10 +5,11 @@ mod report;
 use std::collections::HashSet;
 use std::env;
 use std::fmt::Write as _;
+use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
 use asupersync::Cx;
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use reckon_core::{
     load_pricing_from_cache, load_pricing_fallback, is_pricing_cache_stale, ModelSlug, Source,
 };
@@ -19,6 +20,12 @@ use reckon_readers::opencode::OpenCodeReader;
 use reckon_readers::openrouter::{self, OpenRouterReader};
 use reckon_readers::pi::PiReader;
 use reckon_readers::{run_readers_with_cache, Reader};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ColorMode {
+    Auto,
+    Always,
+}
 
 #[derive(Parser)]
 #[command(name = "reckon")]
@@ -43,7 +50,18 @@ struct Cli {
     /// Default: each source whose data directory exists on disk (or for `OpenRouter`, whose key resolves).
     #[arg(long, value_delimiter = ',')]
     source: Option<Vec<String>>,
+
+    /// Force color output even when output is not a terminal.
+    #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
+    color: ColorMode,
+
+    /// Disable ANSI color output.
+    #[arg(long, conflicts_with = "color")]
+    no_color: bool,
 }
+
+const ANSI_COLOR_RESET: &str = "\x1b[0m";
+const ANSI_YELLOW: &str = "\x1b[33m";
 
 fn cache_path() -> PathBuf {
     let base = env::var("XDG_CACHE_HOME").map_or_else(
@@ -142,6 +160,34 @@ fn format_unknown_model_warning(models: &HashSet<ModelSlug>) -> String {
     message
 }
 
+const fn should_use_color(
+    is_tty: bool,
+    color: ColorMode,
+    no_color_flag: bool,
+    no_color_set: bool,
+) -> bool {
+    if no_color_flag {
+        return false;
+    }
+
+    match color {
+        ColorMode::Always => true,
+        ColorMode::Auto => is_tty && !no_color_set,
+    }
+}
+
+fn colorize(text: &str, ansi_code: &str, enabled: bool) -> String {
+    if enabled {
+        format!("{ansi_code}{text}{ANSI_COLOR_RESET}")
+    } else {
+        text.to_string()
+    }
+}
+
+fn color_warning(text: &str, use_color: bool) -> String {
+    colorize(text, ANSI_YELLOW, use_color)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
@@ -184,11 +230,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pricing_path = pricing_cache_path();
         let pricing = load_pricing_from_cache(&pricing_path).unwrap_or_else(load_pricing_fallback);
 
+        let use_color = should_use_color(
+            io::stdout().is_terminal(),
+            args.color,
+            args.no_color,
+            env::var("NO_COLOR").is_ok(),
+        );
+
         if !args.offline && is_pricing_cache_stale(&pricing_path) {
             let path_for_fetch = pricing_path.clone();
             let _refresh_task = std::thread::spawn(move || {
                 if let Err(e) = pricing_refresh::fetch_and_cache_pricing(&path_for_fetch) {
-                    eprintln!("Warning: failed to refresh pricing cache: {e}");
+                    eprintln!(
+                        "{}",
+                        color_warning(
+                            &format!("Warning: failed to refresh pricing cache: {e}"),
+                            use_color
+                        )
+                    );
                 }
             });
         }
@@ -219,11 +278,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.json {
             render::print_json(&events, &pricing, balance.as_ref());
         } else {
-            render::print_table(&aggregated, &pricing, balance.as_ref());
+            render::print_table(&aggregated, &pricing, balance.as_ref(), use_color);
         }
 
         if !unknown_models.is_empty() {
-            eprintln!("{}", format_unknown_model_warning(&unknown_models));
+            eprintln!(
+                "{}",
+                color_warning(&format_unknown_model_warning(&unknown_models), use_color)
+            );
         }
     });
     runtime.block_on(join);
@@ -294,5 +356,20 @@ mod tests {
         assert!(error.contains("opencode"));
         assert!(error.contains("openrouter"));
         assert!(error.contains("pi"));
+    }
+
+    #[test]
+    fn should_use_color_respects_tty_and_no_color_flag() {
+        assert!(should_use_color(true, ColorMode::Auto, false, false));
+        assert!(!should_use_color(false, ColorMode::Auto, false, false));
+        assert!(!should_use_color(true, ColorMode::Always, true, false));
+        assert!(should_use_color(false, ColorMode::Always, false, false));
+        assert!(!should_use_color(true, ColorMode::Auto, false, true));
+    }
+
+    #[test]
+    fn should_use_color_preserves_manual_override() {
+        assert!(should_use_color(false, ColorMode::Always, false, true));
+        assert!(!should_use_color(false, ColorMode::Always, true, false));
     }
 }

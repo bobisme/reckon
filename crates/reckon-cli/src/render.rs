@@ -8,6 +8,18 @@ use tabled::settings::object::Columns;
 use tabled::settings::{Alignment, Style};
 use tabled::{Table, Tabled};
 
+const ANSI_COLOR_RESET: &str = "\x1b[0m";
+const ANSI_BLUE: &str = "\x1b[36m";
+const ANSI_GREEN: &str = "\x1b[32m";
+
+fn colorize(text: &str, ansi_code: &str, enabled: bool) -> String {
+    if enabled {
+        format!("{ansi_code}{text}{ANSI_COLOR_RESET}")
+    } else {
+        text.to_string()
+    }
+}
+
 use crate::report::{AggregateKey, month_totals};
 
 #[derive(Tabled)]
@@ -34,6 +46,7 @@ pub fn print_table(
     aggregated: &BTreeMap<AggregateKey, TokenCounts>,
     pricing: &HashMap<ModelSlug, Pricing>,
     balance: Option<&OpenRouterSummary>,
+    use_color: bool,
 ) {
     let totals = month_totals(aggregated);
     let months: Vec<YearMonth> = totals.keys().copied().collect();
@@ -86,10 +99,13 @@ pub fn print_table(
         .modify(Columns::new(3..=6), Alignment::right())
         .modify(Columns::single(7), Alignment::right());
 
-    println!("{table}");
+    println!("{}", colorize(&table.to_string(), ANSI_BLUE, use_color));
 
     if let Some(summary) = balance {
-        println!("{}", fmt_balance(summary));
+        println!(
+            "{}",
+            colorize(&fmt_balance(summary), ANSI_GREEN, use_color)
+        );
     }
 }
 
