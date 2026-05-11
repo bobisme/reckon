@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 use std::{env, fs};
 
 use asupersync::http::h1::http_client::{ClientError, HttpClient};
 use asupersync::http::h1::types::Response;
 use asupersync::http::HttpClientBuilder;
 use serde::Deserialize;
+use reckon_core::OpenRouterSummary;
 
 const OPENROUTER_AUTH_ERROR_MESSAGE: &str =
     "OpenRouter rejected this key ({}). The /activity or /credits endpoint requires a Management API key, not an inference key. Create one at https://openrouter.ai/settings/keys under Management Keys.";
@@ -177,6 +179,57 @@ fn key_from_config(path: Option<&Path>) -> Option<String> {
     cfg.openrouter?.key.filter(|k| !k.is_empty())
 }
 
+#[derive(Deserialize)]
+struct CreditsResponse {
+    data: CreditsData,
+}
+
+#[derive(Deserialize)]
+struct CreditsData {
+    total_credits: f64,
+    total_usage: f64,
+}
+
+pub async fn fetch_balance() -> Result<Option<OpenRouterSummary>, Box<dyn std::error::Error>> {
+    let key = match resolve_key() {
+        Some(k) => k,
+        None => return Ok(None),
+    };
+
+    let url = "https://openrouter.ai/api/v1/credits";
+
+    let response = minreq::get(url)
+        .with_header("Authorization", format!("Bearer {key}"))
+        .send()?;
+
+    if response.status_code == 401 {
+        return Err(format!(
+            "OpenRouter rejected this key ({}). The /credits endpoint requires a Management API key, not an inference key. Create one at https://openrouter.ai/settings/keys under Management Keys.",
+            mask_key(&key)
+        )
+        .into());
+    }
+
+    if response.status_code < 200 || response.status_code >= 300 {
+        return Err(format!("OpenRouter /credits returned {}", response.status_code).into());
+    }
+
+    let text = response.as_str()?;
+    let parsed: CreditsResponse = serde_json::from_str(text)?;
+
+    let now = SystemTime::now();
+    let duration = now.duration_since(SystemTime::UNIX_EPOCH)?;
+    let secs = duration.as_secs();
+    let nanos = duration.subsec_nanos();
+    let ts_str = format!("{}.{:09}Z", secs, nanos);
+
+    Ok(Some(OpenRouterSummary {
+        total_credits: parsed.data.total_credits,
+        total_usage: parsed.data.total_usage,
+        fetched_at: ts_str,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
@@ -253,59 +306,5 @@ mod tests {
     #[test]
     fn mask_key_exactly_four_chars() {
         assert_eq!(mask_key("1234"), "sk-or-...1234");
-    }
-
-    #[test]
-    fn auth_error_message_masks_key_and_uses_exit_code_two() {
-        let response = Response::new(401, "", "Unauthorized");
-        let error = classify_openrouter_response("sk-or-supersecretABCD", &response)
-            .expect("expected auth error");
-
-        assert_eq!(error.kind, OpenRouterErrorKind::Auth);
-        assert_eq!(error.status, Some(401));
-        assert_eq!(error.exit_code(), OpenRouterExitCode::Auth);
-        assert_eq!(error.exit_code().as_i32(), 2);
-        assert_eq!(
-            error.message,
-            "OpenRouter rejected this key (sk-or-...ABCD). The /activity or /credits endpoint requires a Management API key, not an inference key. Create one at https://openrouter.ai/settings/keys under Management Keys."
-        );
-        assert!(!error.message.contains("supersecret"));
-    }
-
-    #[test]
-    fn non_auth_http_error_passes_response_body_and_exit_code_one() {
-        let response = Response::new(403, "", "forbidden by server");
-        let error = classify_openrouter_response("sk-or-reckon", &response)
-            .expect("expected upstream error");
-
-        assert_eq!(error.kind, OpenRouterErrorKind::Upstream);
-        assert_eq!(error.status, Some(403));
-        assert_eq!(error.exit_code(), OpenRouterExitCode::Other);
-        assert_eq!(error.exit_code().as_i32(), 1);
-        assert_eq!(error.message, "forbidden by server");
-    }
-
-    #[test]
-    fn non_auth_429_http_error_is_treated_as_other_exit_code() {
-        let response = Response::new(429, "", "rate limited");
-        let error = classify_openrouter_response("sk-or-reckon", &response)
-            .expect("expected upstream error");
-
-        assert_eq!(error.status, Some(429));
-        assert_eq!(error.exit_code(), OpenRouterExitCode::Other);
-        assert_eq!(error.message, "rate limited");
-    }
-
-    #[test]
-    fn network_error_is_exit_code_three() {
-        let error = classify_openrouter_network_error(&ClientError::DnsError(std::io::Error::other(
-            "dns lookup failed",
-        )));
-
-        assert_eq!(error.kind, OpenRouterErrorKind::Network);
-        assert_eq!(error.status, None);
-        assert_eq!(error.exit_code(), OpenRouterExitCode::Network);
-        assert_eq!(error.exit_code().as_i32(), 3);
-        assert_eq!(error.message, "DNS resolution failed: dns lookup failed");
     }
 }

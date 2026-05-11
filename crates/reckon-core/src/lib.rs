@@ -155,6 +155,13 @@ pub struct UsageEvent {
     pub dedup_key: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenRouterSummary {
+    pub total_credits: f64,
+    pub total_usage: f64,
+    pub fetched_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

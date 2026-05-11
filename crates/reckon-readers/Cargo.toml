@@ -10,6 +10,7 @@ workspace = true
 asupersync = { version = "0.2", features = ["proc-macros", "tls-webpki-roots"] }
 async-trait = "0.1"
 futures = "0.3"
+minreq = { version = "2", features = ["https"] }
 reckon-core = { path = "../reckon-core" }
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }

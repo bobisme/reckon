@@ -14,7 +14,7 @@ use reckon_core::{
 };
 use reckon_readers::claude::ClaudeReader;
 use reckon_readers::gemini::GeminiReader;
-use reckon_readers::{run_readers_with_cache, Reader};
+use reckon_readers::{run_readers_with_cache, Reader, openrouter};
 
 #[derive(Parser)]
 #[command(name = "reckon")]
@@ -28,6 +28,10 @@ struct Cli {
     /// Note: newer models may be priced at $0 if not in cache or fallback.
     #[arg(long)]
     offline: bool,
+
+    /// Output as JSON
+    #[arg(long)]
+    json: bool,
 }
 
 fn cache_path() -> PathBuf {
@@ -86,6 +90,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let readers: Vec<Box<dyn Reader>> = vec![Box::new(ClaudeReader::new()), Box::new(GeminiReader::new())];
         let events = run_readers_with_cache(&cx, readers, &cache_path()).await;
 
+        let balance = openrouter::fetch_balance().await.ok().flatten();
+
         if events.is_empty() {
             println!("No usage events found.");
             return;
@@ -93,7 +99,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let aggregated = report::aggregate(events);
         let unknown_models = report::unknown_model_slugs(&aggregated, &pricing);
-        render::print_table(&aggregated, &pricing);
+        if args.json {
+            render::print_json(&aggregated, &pricing, balance.as_ref());
+        } else {
+            render::print_table(&aggregated, &pricing, balance.as_ref());
+        }
 
         if !unknown_models.is_empty() {
             eprintln!("{}", format_unknown_model_warning(&unknown_models));

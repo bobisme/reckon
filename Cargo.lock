@@ -1194,6 +1194,8 @@ dependencies = [
  "minreq",
  "reckon-core",
  "reckon-readers",
+ "serde",
+ "serde_json",
  "tabled",
  "tempfile",
 ]
@@ -1218,6 +1220,7 @@ dependencies = [
  "async-trait",
  "filetime",
  "futures",
+ "minreq",
  "proptest",
  "reckon-core",
  "regex",
