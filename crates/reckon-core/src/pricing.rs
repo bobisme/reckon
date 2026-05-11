@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fs;
 use std::path::Path;
 
@@ -31,6 +30,10 @@ struct CanonicalModelSlug {
     model: String,
 }
 
+/// # Panics
+///
+/// Panics if the file cannot be read or parsed as JSON.
+#[must_use]
 pub fn load_pricing(path: &Path) -> HashMap<ModelSlug, Pricing> {
     let body = fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read pricing file {}: {error}", path.display()));
@@ -61,14 +64,7 @@ pub fn load_pricing(path: &Path) -> HashMap<ModelSlug, Pricing> {
                 reasoning_per_token: entry.output_cost_per_reasoning_token,
             };
 
-            match out.entry(canonical) {
-                Entry::Vacant(vacant) => {
-                    vacant.insert(pricing);
-                }
-                Entry::Occupied(mut occupied) => {
-                    occupied.insert(pricing);
-                }
-            }
+            out.insert(canonical, pricing);
         }
     }
 
@@ -76,16 +72,17 @@ pub fn load_pricing(path: &Path) -> HashMap<ModelSlug, Pricing> {
 }
 
 #[must_use]
+#[expect(clippy::cast_precision_loss)]
 pub fn cost(tokens: &TokenCounts, pricing: &Pricing) -> f64 {
     let reasoning_per_token = pricing
         .reasoning_per_token
         .unwrap_or(pricing.output_per_token);
 
-    (tokens.input as f64 * pricing.input_per_token)
-        + (tokens.output as f64 * pricing.output_per_token)
-        + (tokens.cache_read as f64 * pricing.cache_read_per_token)
-        + (tokens.cache_write as f64 * pricing.cache_write_per_token)
-        + (tokens.reasoning as f64 * reasoning_per_token)
+    let acc = (tokens.input as f64).mul_add(pricing.input_per_token, 0.0);
+    let acc = (tokens.output as f64).mul_add(pricing.output_per_token, acc);
+    let acc = (tokens.cache_read as f64).mul_add(pricing.cache_read_per_token, acc);
+    let acc = (tokens.cache_write as f64).mul_add(pricing.cache_write_per_token, acc);
+    (tokens.reasoning as f64).mul_add(reasoning_per_token, acc)
 }
 
 fn canonical_slug(raw: &str) -> Option<CanonicalModelSlug> {
@@ -107,15 +104,14 @@ fn canonical_slug(raw: &str) -> Option<CanonicalModelSlug> {
 fn canonical_slug_from_slash(raw: &str) -> Option<CanonicalModelSlug> {
     let mut current = raw;
     loop {
-        if let Some((first, rest)) = current.split_once('/') {
-            match first {
-                "openrouter" | "gmi" | "azure" | "deepinfra" | "github_copilot" | "perplexity"
-                | "vercel_ai_gateway" => {
-                    current = rest;
-                    continue;
-                }
-                _ => {}
-            }
+        if let Some((
+            "openrouter" | "gmi" | "azure" | "deepinfra" | "github_copilot" | "perplexity"
+            | "vercel_ai_gateway",
+            rest,
+        )) = current.split_once('/')
+        {
+            current = rest;
+            continue;
         }
         break;
     }
@@ -151,9 +147,7 @@ fn canonical_slug_from_dot(raw: &str) -> Option<CanonicalModelSlug> {
         let mut joined = vec![second];
         joined.extend(rest);
         let dotted = joined.join(".");
-        let mut split = dotted.splitn(2, '.');
-        let vendor = split.next()?;
-        let model = split.next()?;
+        let (vendor, model) = dotted.split_once('.')?;
         return Some(CanonicalModelSlug {
             vendor: normalize_vendor(vendor).to_string(),
             model: model.to_string(),

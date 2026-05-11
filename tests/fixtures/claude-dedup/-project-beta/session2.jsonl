@@ -1,0 +1,1 @@
+{"parentUuid":null,"isSidechain":false,"message":{"model":"claude-sonnet-4-6-20250514","usage":{"input_tokens":100,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":50},"id":"msg_dup"},"requestId":"req_dup_001","type":"assistant","uuid":"uuid-dup2","timestamp":"2026-05-11T12:00:00.000Z","sessionId":"sess-dup2"}

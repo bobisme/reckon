@@ -975,6 +975,9 @@ dependencies = [
  "async-trait",
  "futures",
  "reckon-core",
+ "serde",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

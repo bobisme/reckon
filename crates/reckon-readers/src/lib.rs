@@ -1,3 +1,5 @@
+pub mod claude;
+
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -76,6 +78,13 @@ impl Sink {
         Self { inner: Arc::new(Mutex::new(Some(tx))) }
     }
 
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SinkError` if the channel is closed, disconnected, cancelled, or full.
     pub async fn send(&self, cx: &Cx, event: UsageEvent) -> Result<(), SinkError> {
         let tx = self.inner.lock().expect("sink mutex poisoned").clone();
         let Some(tx) = tx else {
@@ -90,6 +99,9 @@ impl Sink {
         }
     }
 
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     pub fn close(&self) {
         let _ = self.inner.lock().expect("sink mutex poisoned").take();
     }
@@ -117,13 +129,13 @@ pub async fn run_readers(cx: &Cx, readers: Vec<Box<dyn Reader>>) -> Vec<UsageEve
             match rx.recv(cx).await {
                 Ok(event) => events.push(event),
                 Err(mpsc::RecvError::Disconnected | mpsc::RecvError::Cancelled) => break,
-                Err(mpsc::RecvError::Empty) => continue,
+                Err(mpsc::RecvError::Empty) => {}
             }
         }
         events
     };
 
-    let (_, events) = future::join(readers_done, drain).await;
+    let ((), events) = future::join(readers_done, drain).await;
     events
 }
 

@@ -72,11 +72,10 @@ impl YearMonth {
     }
 
     #[must_use]
-    pub fn from_utc(ts: i64) -> Self {
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub const fn from_utc(ts: i64) -> Self {
         const SECS_PER_DAY: i64 = 86_400;
         let days = ts.div_euclid(SECS_PER_DAY);
-        // Civil date from days since Unix epoch (1970-01-01).
-        // Algorithm from Howard Hinnant's `chrono`-compatible date library.
         let z = days + 719_468;
         let era = (if z >= 0 { z } else { z - 146_096 }) / 146_097;
         let doe = (z - era * 146_097) as u32;
@@ -86,7 +85,6 @@ impl YearMonth {
         let mp = (5 * doy + 2) / 153;
         let m = if mp < 10 { mp + 3 } else { mp - 9 };
         let y = if m <= 2 { y + 1 } else { y };
-        #[expect(clippy::cast_possible_truncation)]
         Self {
             year: y as i32,
             month: m as u8,
@@ -94,7 +92,7 @@ impl YearMonth {
     }
 
     #[must_use]
-    pub fn next(self) -> Self {
+    pub const fn next(self) -> Self {
         if self.month == 12 {
             Self { year: self.year + 1, month: 1 }
         } else {
@@ -103,7 +101,7 @@ impl YearMonth {
     }
 
     #[must_use]
-    pub fn prev(self) -> Self {
+    pub const fn prev(self) -> Self {
         if self.month == 1 {
             Self { year: self.year - 1, month: 12 }
         } else {
@@ -129,7 +127,7 @@ pub struct TokenCounts {
 
 impl TokenCounts {
     #[must_use]
-    pub fn total(&self) -> u64 {
+    pub const fn total(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_write + self.reasoning
     }
 }
