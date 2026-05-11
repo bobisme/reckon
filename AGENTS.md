@@ -5,6 +5,67 @@ Tools: `bones`, `maw`, `seal`, `rite`, `vessel`
 
 <!-- Add project-specific context below: architecture, conventions, key files, etc. -->
 
+## About reckon
+
+reckon is a personal CLI that reads local session logs from every AI
+coding agent on this machine (Claude Code, Codex CLI, Gemini CLI, Pi,
+OpenCode) plus OpenRouter's HTTP API, normalises everything into a
+single `UsageEvent`, and prints one monthly table with token counts and
+**unsubsidized** USD cost (LiteLLM list prices applied locally — not
+the user's actual subscription/bundle rates).
+
+**Scope is deliberately narrow.** Three features only:
+1. Token usage per model.
+2. Unsubsidized cost.
+3. Monthly aggregation.
+
+We do **not** clone the rest of ccusage (no daily/session/blocks/live
+modes, no statusline, no MCP). If you find yourself adding one of
+those, stop and check with the user first.
+
+### Architecture invariants
+
+- **Runtime:** `asupersync` (no tokio, no hyper, no reqwest, no
+  tower/axum/async-std/smol). CI greps `cargo tree` to enforce this.
+- **One canonical type:** every Reader emits `UsageEvent` (see
+  `crates/reckon-core`). Aggregation and rendering are downstream.
+- **Network policy:** the only outbound traffic is (a) OpenRouter API
+  with the user's own Management key, and (b) LiteLLM pricing JSON,
+  refreshed weekly and skippable with `--offline`. No telemetry, ever.
+- **Cost at display time, not at write time.** The events table never
+  stores USD — refreshing the pricing snapshot re-prices history for
+  free.
+- **Vendored pricing fallback:** `crates/reckon-core/assets/pricing-fallback.json`
+  is checked in so a fresh clone with `--offline` produces correct
+  numbers for major models.
+
+### Key files & locations
+
+- `notes/plan.md` — design bible. Source paths, field maps, dedup
+  keys, milestone list. Treat as authoritative when bones disagree.
+- `README.md` — user-facing description of how the tool will work.
+- `crates/reckon-core/` — types, model_map, pricing, cost math, cache.
+- `crates/reckon-readers/` — one module per source (claude/codex/
+  gemini/pi/opencode/openrouter). Each implements the `Reader` trait.
+- `crates/reckon-cli/` — clap front-end, aggregator, table renderer.
+- `crates/xtask/` — `cargo xtask vendor-pricing` and other maintenance.
+
+### Working on this project
+
+Use bones. The pile is fully spec'd: `bn list` shows 41 open, `bn next`
+returns the single ready bone. Every task bone has a **Scope** section
+(specific files/types/field maps) and an **Acceptance** section
+(concrete pass/fail criteria). Don't widen the scope of a bone without
+asking — `notes/plan.md` is the contract.
+
+Source-of-truth for what's in scope, in priority order:
+1. The user's direct instructions in chat.
+2. `notes/plan.md`.
+3. The Scope/Acceptance of the bone you're on.
+
+Anything not in those three is out of scope for v1.
+
+
 <!-- edict:managed-start -->## Edict Workflow
 
 ### How to Make Changes
