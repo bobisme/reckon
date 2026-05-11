@@ -13,6 +13,7 @@ use reckon_core::{
     load_pricing_from_cache, load_pricing_fallback, is_pricing_cache_stale, ModelSlug,
 };
 use reckon_readers::claude::ClaudeReader;
+use reckon_readers::gemini::GeminiReader;
 use reckon_readers::{run_readers_with_cache, Reader};
 
 #[derive(Parser)]
@@ -82,7 +83,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-        let readers: Vec<Box<dyn Reader>> = vec![Box::new(ClaudeReader::new())];
+        let readers: Vec<Box<dyn Reader>> = vec![Box::new(ClaudeReader::new()), Box::new(GeminiReader::new())];
         let events = run_readers_with_cache(&cx, readers, &cache_path()).await;
 
         if events.is_empty() {
