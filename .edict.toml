@@ -1,0 +1,76 @@
+#:schema https://raw.githubusercontent.com/bobisme/edict/main/schemas/edict.schema.json
+# Edict project configuration
+# Schema: https://github.com/bobisme/edict/blob/main/schemas/edict.schema.json
+
+version = "1.0.16"
+push_main = false
+
+[project]
+name = "reckon"
+type = ["cli"]
+languages = ["rust"]
+default_agent = "reckon-dev"
+channel = "reckon"
+install_command = "just install"
+check_command = "just check"
+
+# Companion tools to enable
+[tools]
+bones = true
+maw = true
+seal = true
+rite = true
+vessel = true
+
+# Code review configuration
+[review]
+enabled = false
+reviewers = []
+
+[agents.dev]
+model = "strong"
+max_loops = 100
+pause = 2
+timeout = 3600
+
+[agents.dev.missions]
+enabled = true
+max_workers = 4
+max_children = 12
+checkpoint_interval_sec = 30
+
+[agents.worker]
+model = "fast"
+timeout = 900
+
+[agents.reviewer]
+model = "strong"
+max_loops = 100
+pause = 2
+timeout = 900
+
+# Model tier pools for load balancing
+# Each tier maps to a list of "provider/model:thinking" strings
+[models]
+fast = [
+    "anthropic/claude-haiku-4-5:low",
+    "google-gemini-cli/gemini-3-flash-preview",
+    "openai-codex/gpt-5.3-codex-spark:medium",
+]
+balanced = [
+    "anthropic/claude-sonnet-4-6:medium",
+    "google-gemini-cli/gemini-3.1-pro-preview",
+    "openai-codex/gpt-5.4:medium",
+]
+strong = [
+    "anthropic/claude-opus-4-6:high",
+    "openai-codex/gpt-5.3-codex:high",
+]
+
+# Environment variables passed to all spawned agents
+# Values support shell variable expansion ($HOME, ${HOME})
+# Set OTEL_EXPORTER_OTLP_ENDPOINT to enable telemetry: "stderr" for JSON to stderr, "http://host:port" for OTLP HTTP
+[env]
+RUSTC_WRAPPER = "sccache"
+CARGO_BUILD_JOBS = "2"
+SCCACHE_DIR = "$HOME/.cache/sccache"

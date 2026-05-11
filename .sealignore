@@ -1,0 +1,10 @@
+# Ignore edict-managed files (prompts, scripts, hooks, journals)
+.agents/edict/
+
+# Ignore tool config and data files
+.seal/
+.maw.toml
+.edict.toml
+.botbox.json
+.claude/
+opencode.json
