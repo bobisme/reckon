@@ -1218,6 +1218,7 @@ dependencies = [
  "async-trait",
  "filetime",
  "futures",
+ "proptest",
  "reckon-core",
  "regex",
  "rusqlite",

@@ -1,8 +1,17 @@
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::{env, fs, io};
 
+use asupersync::{Cx, Outcome};
+use async_trait::async_trait;
+use reckon_core::model_map;
+use reckon_core::{Source, TokenCounts, UsageEvent, YearMonth};
 use regex::Regex;
+use serde::Deserialize;
+use serde_json::Value;
+
+use crate::{CacheStrategy, Reader, ReaderError, Sink, SinkError};
 
 /// Represents a Codex session file with its path, session UUID, and date.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -168,9 +177,316 @@ fn home_dir() -> PathBuf {
     env::var("HOME").map(PathBuf::from).expect("HOME not set")
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct CodexSessionState {
+    previous_totals: TokenCounts,
+    active_model: Option<String>,
+    session_id: Option<String>,
+    provider: Option<String>,
+    project: Option<String>,
+    turn_index: u32,
+}
+
+impl CodexSessionState {
+    fn on_session_meta(&mut self, payload: SessionMetaPayload) {
+        self.previous_totals = TokenCounts::default();
+        self.active_model = None;
+        self.session_id = payload.id;
+        self.provider = payload.model_provider;
+        self.project = payload.cwd;
+        self.turn_index = 0;
+    }
+
+    fn on_turn_context(&mut self, payload: TurnContextPayload) {
+        if let Some(model) = payload.model {
+            self.active_model = Some(model);
+        }
+        if let Some(cwd) = payload.cwd {
+            self.project = Some(cwd);
+        }
+    }
+
+    fn on_token_count(&mut self, timestamp_secs: i64, current: TokenCounts) -> Option<UsageEvent> {
+        let delta = delta_counts(self.previous_totals, current);
+        self.previous_totals = current;
+
+        let turn_index = self.turn_index;
+        self.turn_index = self.turn_index.saturating_add(1);
+
+        if delta.total() == 0 {
+            return None;
+        }
+
+        let raw_model = self.active_model.as_deref()?;
+        let session_id = self.session_id.as_deref()?;
+
+        Some(UsageEvent {
+            source: Source::Codex,
+            month: YearMonth::from_utc(timestamp_secs),
+            model: model_map::canonical(Source::Codex, raw_model, None),
+            provider: self.provider.clone().unwrap_or_else(|| "openai".into()),
+            project: self.project.clone(),
+            tokens: delta,
+            dedup_key: format!("{session_id}:{turn_index}"),
+        })
+    }
+}
+
+#[must_use]
+const fn delta_counts(previous: TokenCounts, current: TokenCounts) -> TokenCounts {
+    TokenCounts {
+        input: current.input.saturating_sub(previous.input),
+        output: current.output.saturating_sub(previous.output),
+        cache_read: current.cache_read.saturating_sub(previous.cache_read),
+        cache_write: current.cache_write.saturating_sub(previous.cache_write),
+        reasoning: current.reasoning.saturating_sub(previous.reasoning),
+    }
+}
+
+#[derive(Deserialize)]
+struct JsonlEntry {
+    timestamp: Option<String>,
+    #[serde(rename = "type")]
+    entry_type: String,
+    payload: Value,
+}
+
+#[derive(Deserialize)]
+struct SessionMetaPayload {
+    id: Option<String>,
+    cwd: Option<String>,
+    model_provider: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TurnContextPayload {
+    model: Option<String>,
+    cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct EventPayload {
+    #[serde(rename = "type")]
+    payload_type: String,
+    info: Option<TokenCountInfo>,
+}
+
+#[derive(Deserialize)]
+struct TokenCountInfo {
+    total_token_usage: Option<TotalTokenUsage>,
+}
+
+#[derive(Deserialize)]
+#[expect(clippy::struct_field_names)]
+struct TotalTokenUsage {
+    input_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    reasoning_output_tokens: Option<u64>,
+}
+
+fn token_counts_from_info(info: Option<TokenCountInfo>) -> Option<TokenCounts> {
+    let total = info?.total_token_usage?;
+    Some(TokenCounts {
+        input: total.input_tokens.unwrap_or(0),
+        output: total.output_tokens.unwrap_or(0),
+        cache_read: total.cached_input_tokens.unwrap_or(0),
+        cache_write: 0,
+        reasoning: total.reasoning_output_tokens.unwrap_or(0),
+    })
+}
+
+enum ScanError {
+    Sink(SinkError),
+    Io(io::Error),
+}
+
+async fn scan_rollout_file(path: &Path, cx: &Cx, sink: &Sink) -> Result<(), ScanError> {
+    let contents = fs::read_to_string(path).map_err(ScanError::Io)?;
+    let mut state = CodexSessionState::default();
+
+    for line in contents.lines() {
+        if line.is_empty() {
+            continue;
+        }
+
+        let entry: JsonlEntry = match serde_json::from_str(line) {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+
+        match entry.entry_type.as_str() {
+            "session_meta" => {
+                let Ok(payload) = serde_json::from_value::<SessionMetaPayload>(entry.payload) else {
+                    continue;
+                };
+                state.on_session_meta(payload);
+            }
+            "turn_context" => {
+                let Ok(payload) = serde_json::from_value::<TurnContextPayload>(entry.payload) else {
+                    continue;
+                };
+                state.on_turn_context(payload);
+            }
+            "event_msg" => {
+                let Ok(payload) = serde_json::from_value::<EventPayload>(entry.payload) else {
+                    continue;
+                };
+                if payload.payload_type != "token_count" {
+                    continue;
+                }
+                let Some(current) = token_counts_from_info(payload.info) else {
+                    continue;
+                };
+                let Some(timestamp) = entry.timestamp.as_deref() else { continue };
+                let Some(timestamp_secs) = parse_iso8601_to_epoch(timestamp) else {
+                    continue;
+                };
+                if let Some(event) = state.on_token_count(timestamp_secs, current) {
+                    sink.send(cx, event).await.map_err(ScanError::Sink)?;
+                }
+            }
+            "token_count" => {
+                let Ok(payload) = serde_json::from_value::<EventPayload>(entry.payload) else {
+                    continue;
+                };
+                let Some(current) = token_counts_from_info(payload.info) else {
+                    continue;
+                };
+                let Some(timestamp) = entry.timestamp.as_deref() else { continue };
+                let Some(timestamp_secs) = parse_iso8601_to_epoch(timestamp) else {
+                    continue;
+                };
+                if let Some(event) = state.on_token_count(timestamp_secs, current) {
+                    sink.send(cx, event).await.map_err(ScanError::Sink)?;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let metadata = fs::metadata(path).map_err(ScanError::Io)?;
+    let mtime_ns = file_modified_nanos(metadata.modified().map_err(ScanError::Io)?).map_err(ScanError::Io)?;
+    let size_bytes = i64::try_from(metadata.len()).expect("file size too large");
+    sink.record_source_file(Source::Codex, path, mtime_ns, size_bytes, size_bytes);
+
+    Ok(())
+}
+
+fn file_modified_nanos(modified: SystemTime) -> Result<i64, io::Error> {
+    modified
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos()
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "mtime too large for i64"))
+}
+
+fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let year: i32 = s.get(0..4)?.parse().ok()?;
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    let hour: u32 = s.get(11..13)?.parse().ok()?;
+    let min: u32 = s.get(14..16)?.parse().ok()?;
+    let sec: u32 = s.get(17..19)?.parse().ok()?;
+
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    Some(civil_to_epoch(year, month, day, hour, min, sec))
+}
+
+#[expect(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+fn civil_to_epoch(y: i32, m: u32, d: u32, h: u32, min: u32, sec: u32) -> i64 {
+    let (y, m) = if m <= 2 { (i64::from(y) - 1, m + 9) } else { (i64::from(y), m - 3) };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as u64;
+    let doy = (153 * u64::from(m) + 2) / 5 + u64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe as i64 - 719_468;
+    days * 86_400 + i64::from(h) * 3_600 + i64::from(min) * 60 + i64::from(sec)
+}
+
+#[async_trait]
+impl Reader for CodexReader {
+    fn source(&self) -> Source {
+        Source::Codex
+    }
+
+    async fn scan(&self, cx: &Cx, sink: &Sink) -> Outcome<(), ReaderError> {
+        let sessions = match self.enumerate() {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                return Outcome::Err(ReaderError::new(format!(
+                    "reading {}: {e}",
+                    self.root.join("sessions").display()
+                )));
+            }
+        };
+
+        for session in sessions {
+            match scan_rollout_file(&session.path, cx, sink).await {
+                Ok(()) => {}
+                Err(ScanError::Sink(SinkError::Cancelled)) => {
+                    return Outcome::Cancelled(
+                        cx.cancel_reason()
+                            .unwrap_or_else(asupersync::CancelReason::shutdown),
+                    );
+                }
+                Err(ScanError::Sink(_)) => return Outcome::ok(()),
+                Err(ScanError::Io(e)) => {
+                    return Outcome::Err(ReaderError::new(format!(
+                        "reading {}: {e}",
+                        session.path.display()
+                    )));
+                }
+            }
+        }
+
+        Outcome::ok(())
+    }
+
+    fn cache_strategy(&self) -> CacheStrategy {
+        CacheStrategy::JsonlTail
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use asupersync::lab::{LabConfig, LabRuntime};
+    use asupersync::Budget;
+    use proptest::prelude::*;
+
     use super::*;
+    use crate::run_readers;
+
+    fn run_on_lab<T, F>(seed: u64, f: F) -> T
+    where
+        T: Send + 'static,
+        F: FnOnce(Cx) -> futures::future::BoxFuture<'static, T> + Send + 'static,
+    {
+        let mut runtime = LabRuntime::new(LabConfig::new(seed));
+        let region = runtime.state.create_root_region(Budget::INFINITE);
+        let slot = Arc::new(Mutex::new(None));
+        let slot_clone = Arc::clone(&slot);
+        let (task_id, _handle) = runtime
+            .state
+            .create_task(region, Budget::INFINITE, async move {
+                let cx = Cx::current().expect("task cx");
+                let value = f(cx).await;
+                *slot_clone.lock().expect("slot mutex poisoned") = Some(value);
+            })
+            .expect("create task");
+        runtime.scheduler.lock().schedule(task_id, Budget::INFINITE.priority);
+        runtime.run_until_quiescent();
+        slot.lock().expect("slot mutex poisoned").take().expect("task result")
+    }
 
     #[test]
     fn extract_uuid_basic() {
@@ -268,16 +584,8 @@ mod tests {
         .expect("write");
 
         // Add non-JSONL files
-        fs::write(
-            sessions_dir.join("2026/05/10/logs_2.sqlite"),
-            "dummy",
-        )
-        .expect("write");
-        fs::write(
-            sessions_dir.join("2026/05/10/other-file.txt"),
-            "dummy",
-        )
-        .expect("write");
+        fs::write(sessions_dir.join("2026/05/10/logs_2.sqlite"), "dummy").expect("write");
+        fs::write(sessions_dir.join("2026/05/10/other-file.txt"), "dummy").expect("write");
         fs::write(
             sessions_dir.join("2026/05/10/session-2026-05-10T10-00-00-session2.jsonl"),
             "dummy",
@@ -321,5 +629,198 @@ mod tests {
         assert_eq!(sessions[1].session_uuid, "b");
         assert_eq!(sessions[2].date, (2026, 5, 15));
         assert_eq!(sessions[2].session_uuid, "c");
+    }
+
+    #[test]
+    fn rollout_sample_yields_known_events() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let fixture_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("fixtures")
+            .join("codex");
+        let session_path = tmp
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("05")
+            .join("10")
+            .join("rollout-2026-05-10T12-00-00-session-123.jsonl");
+        fs::create_dir_all(session_path.parent().expect("parent")).expect("create sessions dir");
+        fs::copy(fixture_dir.join("rollout-sample.jsonl"), &session_path).expect("copy fixture");
+
+        let events: Vec<UsageEvent> = run_on_lab(42, move |cx| {
+            let root = tmp.path().to_path_buf();
+            Box::pin(async move {
+                let _tmp = tmp;
+                run_readers(&cx, vec![Box::new(CodexReader::with_root(root))]).await
+            })
+        });
+
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events,
+            vec![
+                UsageEvent {
+                    source: Source::Codex,
+                    month: YearMonth::new(2026, 5),
+                    model: model_map::canonical(Source::Codex, "gpt-5.2", None),
+                    provider: "openai".into(),
+                    project: Some("/home/bob/src/reckon".into()),
+                    tokens: TokenCounts {
+                        input: 100,
+                        output: 20,
+                        cache_read: 10,
+                        cache_write: 0,
+                        reasoning: 5,
+                    },
+                    dedup_key: "session-123:0".into(),
+                },
+                UsageEvent {
+                    source: Source::Codex,
+                    month: YearMonth::new(2026, 5),
+                    model: model_map::canonical(Source::Codex, "gpt-5.2", None),
+                    provider: "openai".into(),
+                    project: Some("/home/bob/src/reckon".into()),
+                    tokens: TokenCounts {
+                        input: 50,
+                        output: 10,
+                        cache_read: 5,
+                        cache_write: 0,
+                        reasoning: 1,
+                    },
+                    dedup_key: "session-123:1".into(),
+                },
+                UsageEvent {
+                    source: Source::Codex,
+                    month: YearMonth::new(2026, 5),
+                    model: model_map::canonical(Source::Codex, "gpt-5.2-codex", None),
+                    provider: "openai".into(),
+                    project: Some("/home/bob/src/reckon".into()),
+                    tokens: TokenCounts {
+                        input: 40,
+                        output: 20,
+                        cache_read: 5,
+                        cache_write: 0,
+                        reasoning: 2,
+                    },
+                    dedup_key: "session-123:2".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rollout_missing_token_count_yields_zero_events() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session_path = tmp
+            .path()
+            .join("sessions")
+            .join("2026")
+            .join("05")
+            .join("10")
+            .join("rollout-2026-05-10T12-00-00-session-123.jsonl");
+        fs::create_dir_all(session_path.parent().expect("parent")).expect("create sessions dir");
+        fs::write(
+            &session_path,
+            concat!(
+                "{\"timestamp\":\"2026-05-10T12:00:00.000Z\",\"type\":\"session_meta\",\"payload\":{\"id\":\"session-123\",\"cwd\":\"/home/bob/src/reckon\",\"model_provider\":\"openai\"}}\n",
+                "{\"timestamp\":\"2026-05-10T12:00:01.000Z\",\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5.2\",\"cwd\":\"/home/bob/src/reckon\"}}\n"
+            ),
+        )
+        .expect("write fixture");
+
+        let events: Vec<UsageEvent> = run_on_lab(7, move |cx| {
+            let root = tmp.path().to_path_buf();
+            Box::pin(async move {
+                let _tmp = tmp;
+                run_readers(&cx, vec![Box::new(CodexReader::with_root(root))]).await
+            })
+        });
+
+        assert!(events.is_empty());
+    }
+
+    proptest! {
+        #[test]
+        fn cumulative_deltas_sum_to_final_totals(
+            increments in prop::collection::vec(
+                (0u16..5000, 0u16..5000, 0u16..1000, 0u16..1000),
+                1..20,
+            ),
+            model_switches in prop::collection::vec(any::<bool>(), 1..20),
+        ) {
+            let mut state = CodexSessionState::default();
+            state.on_session_meta(SessionMetaPayload {
+                id: Some("session-prop".into()),
+                cwd: Some("/tmp/project".into()),
+                model_provider: Some("openai".into()),
+            });
+
+            let mut sum = TokenCounts::default();
+            let mut final_totals = TokenCounts::default();
+
+            for (index, (input, output, cache_read, reasoning)) in increments.iter().copied().enumerate() {
+                let model = if model_switches[index % model_switches.len()] {
+                    "gpt-5.2-codex"
+                } else {
+                    "gpt-5.2"
+                };
+                state.on_turn_context(TurnContextPayload {
+                    model: Some(model.into()),
+                    cwd: None,
+                });
+
+                final_totals.input += u64::from(input);
+                final_totals.output += u64::from(output);
+                final_totals.cache_read += u64::from(cache_read);
+                final_totals.reasoning += u64::from(reasoning);
+
+                let event = state
+                    .on_token_count(1_778_414_400, final_totals)
+                    .expect("strictly increasing totals should emit an event");
+                sum += event.tokens;
+            }
+
+            prop_assert_eq!(sum, final_totals);
+        }
+
+        #[test]
+        fn negative_deltas_clamp_to_zero(
+            previous in (1u16..5000, 1u16..5000, 1u16..1000, 1u16..1000),
+            smaller in (0u16..4999, 0u16..4999, 0u16..999, 0u16..999),
+        ) {
+            let mut state = CodexSessionState::default();
+            state.on_session_meta(SessionMetaPayload {
+                id: Some("session-prop".into()),
+                cwd: Some("/tmp/project".into()),
+                model_provider: Some("openai".into()),
+            });
+            state.on_turn_context(TurnContextPayload {
+                model: Some("gpt-5.2".into()),
+                cwd: None,
+            });
+
+            let previous_totals = TokenCounts {
+                input: u64::from(previous.0),
+                output: u64::from(previous.1),
+                cache_read: u64::from(previous.2),
+                cache_write: 0,
+                reasoning: u64::from(previous.3),
+            };
+            let smaller_totals = TokenCounts {
+                input: u64::from(smaller.0.min(previous.0.saturating_sub(1))),
+                output: u64::from(smaller.1.min(previous.1.saturating_sub(1))),
+                cache_read: u64::from(smaller.2.min(previous.2.saturating_sub(1))),
+                cache_write: 0,
+                reasoning: u64::from(smaller.3.min(previous.3.saturating_sub(1))),
+            };
+
+            let _ = state.on_token_count(1_778_414_400, previous_totals).expect("first event");
+            let event = state.on_token_count(1_778_414_401, smaller_totals);
+
+            prop_assert_eq!(event, None);
+        }
     }
 }

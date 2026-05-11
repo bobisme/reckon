@@ -1,0 +1,7 @@
+{"timestamp":"2026-05-10T12:00:00.000Z","type":"session_meta","payload":{"id":"session-123","timestamp":"2026-05-10T12:00:00.000Z","cwd":"/home/bob/src/reckon","model_provider":"openai"}}
+{"timestamp":"2026-05-10T12:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.2","cwd":"/home/bob/src/reckon"}}
+{"timestamp":"2026-05-10T12:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":10,"output_tokens":20,"reasoning_output_tokens":5}}}}
+{"timestamp":"2026-05-10T12:00:03.000Z","type":"event_msg","payload":{"type":"other_event","info":null}}
+{"timestamp":"2026-05-10T12:00:04.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":15,"output_tokens":30,"reasoning_output_tokens":6}}}}
+{"timestamp":"2026-05-10T12:00:05.000Z","type":"turn_context","payload":{"model":"gpt-5.2-codex","cwd":"/home/bob/src/reckon"}}
+{"timestamp":"2026-05-10T12:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":190,"cached_input_tokens":20,"output_tokens":50,"reasoning_output_tokens":8}}}}
