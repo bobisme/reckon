@@ -287,7 +287,9 @@ impl OpenCodeReader {
             }
         };
 
-        let mut cursor: i64 = 0;
+        let mut cursor: i64 = sink
+            .source_file_state(Source::OpenCode, &self.db_path)
+            .map_or(0, |state| state.last_offset);
 
         loop {
             let page = match with_busy_retry(|| read_page(&conn, cursor)) {
@@ -341,6 +343,8 @@ impl OpenCodeReader {
             }
         }
 
+        sink.record_source_file(Source::OpenCode, &self.db_path, 0, 0, cursor);
+
         Outcome::ok(())
     }
 }
@@ -371,7 +375,7 @@ mod tests {
     use rusqlite::Connection;
 
     use super::*;
-    use crate::run_readers;
+    use crate::{run_readers, run_readers_with_cache};
 
     fn run_on_lab<T, F>(seed: u64, f: F) -> T
     where
@@ -735,5 +739,108 @@ mod tests {
         assert_eq!(events[0].tokens.reasoning, 0);
         assert_eq!(events[0].tokens.cache_read, 0);
         assert_eq!(events[0].tokens.cache_write, 0);
+    }
+
+    #[test]
+    fn warm_scan_emits_zero_events_when_no_new_rows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("opencode.db");
+        let conn = create_message_db(&db_path);
+        insert_row(&conn, "msg-1", "sess-1", (100, 50, 0, 0, 0), "gpt-4o", "openai", 1_000_000);
+        insert_row(&conn, "msg-2", "sess-1", (200, 100, 0, 0, 0), "gpt-4o", "openai", 2_000_000);
+        drop(conn);
+
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        let cache_path = cache_dir.path().join("index.sqlite");
+
+        let events_cold: Vec<UsageEvent> = {
+            let db = db_path.clone();
+            let cp = cache_path.clone();
+            run_on_lab(1, move |cx| {
+                Box::pin(async move {
+                    run_readers_with_cache(
+                        &cx,
+                        vec![Box::new(OpenCodeReader::with_db_path(db))],
+                        &cp,
+                    )
+                    .await
+                })
+            })
+        };
+        assert_eq!(events_cold.len(), 2);
+
+        let start = Instant::now();
+        let events_warm: Vec<UsageEvent> = {
+            let db = db_path.clone();
+            let cp = cache_path.clone();
+            run_on_lab(2, move |cx| {
+                Box::pin(async move {
+                    run_readers_with_cache(
+                        &cx,
+                        vec![Box::new(OpenCodeReader::with_db_path(db))],
+                        &cp,
+                    )
+                    .await
+                })
+            })
+        };
+        let elapsed = start.elapsed();
+
+        assert_eq!(events_warm.len(), 0);
+        assert!(
+            elapsed.as_millis() < 50,
+            "warm scan took {elapsed:?}, expected < 50ms"
+        );
+    }
+
+    #[test]
+    fn warm_scan_emits_only_new_rows() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("opencode.db");
+        let conn = create_message_db(&db_path);
+        insert_row(&conn, "msg-1", "sess-1", (100, 50, 0, 0, 0), "gpt-4o", "openai", 1_000_000);
+        drop(conn);
+
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        let cache_path = cache_dir.path().join("index.sqlite");
+
+        let events_cold: Vec<UsageEvent> = {
+            let db = db_path.clone();
+            let cp = cache_path.clone();
+            run_on_lab(10, move |cx| {
+                Box::pin(async move {
+                    run_readers_with_cache(
+                        &cx,
+                        vec![Box::new(OpenCodeReader::with_db_path(db))],
+                        &cp,
+                    )
+                    .await
+                })
+            })
+        };
+        assert_eq!(events_cold.len(), 1);
+
+        let conn = Connection::open(&db_path).expect("reopen db");
+        insert_row(&conn, "msg-2", "sess-1", (300, 150, 0, 0, 0), "gpt-4o", "openai", 2_000_000);
+        drop(conn);
+
+        let events_warm: Vec<UsageEvent> = {
+            let db = db_path.clone();
+            let cp = cache_path.clone();
+            run_on_lab(11, move |cx| {
+                Box::pin(async move {
+                    run_readers_with_cache(
+                        &cx,
+                        vec![Box::new(OpenCodeReader::with_db_path(db))],
+                        &cp,
+                    )
+                    .await
+                })
+            })
+        };
+
+        assert_eq!(events_warm.len(), 1);
+        assert_eq!(events_warm[0].dedup_key, "msg-2");
+        assert_eq!(events_warm[0].tokens.input, 300);
     }
 }

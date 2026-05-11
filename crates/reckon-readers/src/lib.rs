@@ -298,7 +298,7 @@ pub(crate) fn read_jsonl_from_offset(path: &Path, start_offset: i64) -> io::Resu
 }
 
 fn persist_events(conn: &mut Connection, events: &mut Vec<UsageEvent>) {
-    let stmt = "INSERT OR IGNORE INTO events \
+    let stmt = "INSERT OR REPLACE INTO events \
         (source, dedup_key, month, model, provider, project, input, output, cache_read, cache_write, reasoning, known_cost_usd, byok_usage_inference) \
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
 
@@ -801,5 +801,90 @@ mod tests {
         });
 
         assert_eq!(db_rows, 7_500);
+    }
+
+    #[test]
+    fn replace_updates_cached_events_with_new_values() {
+        let cache_dir = TempDir::new().expect("temp cache dir");
+        let cache_path = cache_dir.path().join("index.sqlite");
+
+        let (_runtime, _) = run_on_lab(51, {
+            let cache_path = cache_path.clone();
+            move |cx| {
+                Box::pin(async move {
+                    let mut event = event(Source::OpenRouter, 0);
+                    event.dedup_key = "or:2026-05-01:ep-1".into();
+                    event.known_cost_usd = Some(0.5);
+
+                    let (tx, mut rx) = mpsc::channel(Sink::CAPACITY);
+                    let sink = Sink::new_cached(tx, &cache_path);
+                    sink.send(&cx, event).await.expect("send");
+                    sink.close();
+                    while rx.recv(&cx).await.is_ok() {}
+                })
+            }
+        });
+
+        let cost_before: f64 = {
+            let conn = open_cache(&cache_path);
+            conn.query_row(
+                "SELECT known_cost_usd FROM events WHERE dedup_key = 'or:2026-05-01:ep-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query cost")
+        };
+        assert!((cost_before - 0.5).abs() < f64::EPSILON);
+
+        let (_runtime, _) = run_on_lab(52, {
+            let cache_path = cache_path.clone();
+            move |cx| {
+                Box::pin(async move {
+                    let mut event = event(Source::OpenRouter, 0);
+                    event.dedup_key = "or:2026-05-01:ep-1".into();
+                    event.known_cost_usd = Some(1.25);
+
+                    let (tx, mut rx) = mpsc::channel(Sink::CAPACITY);
+                    let sink = Sink::new_cached(tx, &cache_path);
+                    sink.send(&cx, event).await.expect("send");
+                    sink.close();
+                    while rx.recv(&cx).await.is_ok() {}
+                })
+            }
+        });
+
+        let conn = open_cache(&cache_path);
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events WHERE dedup_key = 'or:2026-05-01:ep-1'", [], |row| {
+                row.get(0)
+            })
+            .expect("query count");
+        let cost_after: f64 = conn
+            .query_row(
+                "SELECT known_cost_usd FROM events WHERE dedup_key = 'or:2026-05-01:ep-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query cost");
+
+        assert_eq!(count, 1);
+        assert!((cost_after - 1.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn cache_strategy_correct_per_source() {
+        use crate::claude::ClaudeReader;
+        use crate::codex::CodexReader;
+        use crate::gemini::GeminiReader;
+        use crate::opencode::OpenCodeReader;
+        use crate::openrouter::OpenRouterReader;
+        use crate::pi::PiReader;
+
+        assert_eq!(ClaudeReader::new().cache_strategy(), CacheStrategy::JsonlTail);
+        assert_eq!(CodexReader::new().cache_strategy(), CacheStrategy::JsonlTail);
+        assert_eq!(PiReader::new().cache_strategy(), CacheStrategy::JsonlTail);
+        assert_eq!(GeminiReader::new().cache_strategy(), CacheStrategy::NeverCache);
+        assert_eq!(OpenCodeReader::new().cache_strategy(), CacheStrategy::SqlCursor);
+        assert_eq!(OpenRouterReader::new().cache_strategy(), CacheStrategy::NeverCache);
     }
 }
