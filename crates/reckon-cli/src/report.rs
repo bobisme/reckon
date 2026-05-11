@@ -4,14 +4,14 @@ use reckon_core::{ModelSlug, Pricing, Source, TokenCounts, UsageEvent, YearMonth
 
 pub type AggregateKey = (YearMonth, Source, ModelSlug);
 
-pub fn aggregate(events: Vec<UsageEvent>) -> BTreeMap<AggregateKey, TokenCounts> {
+pub fn aggregate(events: &[UsageEvent]) -> BTreeMap<AggregateKey, TokenCounts> {
     let mut seen = HashSet::new();
     let mut map: BTreeMap<AggregateKey, TokenCounts> = BTreeMap::new();
     for event in events {
-        if !seen.insert(event.dedup_key) {
+        if !seen.insert(event.dedup_key.clone()) {
             continue;
         }
-        *map.entry((event.month, event.source, event.model))
+        *map.entry((event.month, event.source, event.model.clone()))
             .or_default() += event.tokens;
     }
     map
@@ -71,7 +71,7 @@ mod tests {
             event(5, Source::Claude, "anthropic/claude-opus-4.7", 100, "req-1"),
             event(5, Source::Claude, "anthropic/claude-opus-4.7", 100, "req-1"),
         ];
-        let agg = aggregate(events);
+        let agg = aggregate(&events);
         let key = (
             YearMonth::new(2026, 5),
             Source::Claude,
@@ -86,7 +86,7 @@ mod tests {
             event(5, Source::Claude, "anthropic/claude-opus-4.7", 100, "req-1"),
             event(5, Source::Claude, "anthropic/claude-opus-4.7", 200, "req-2"),
         ];
-        let agg = aggregate(events);
+        let agg = aggregate(&events);
         let key = (
             YearMonth::new(2026, 5),
             Source::Claude,
@@ -109,7 +109,7 @@ mod tests {
             ),
             event(4, Source::Claude, "anthropic/claude-opus-4.7", 200, "req-3"),
         ];
-        let agg = aggregate(events);
+        let agg = aggregate(&events);
         let totals = month_totals(&agg);
         assert_eq!(totals[&YearMonth::new(2026, 5)].input, 150);
         assert_eq!(totals[&YearMonth::new(2026, 4)].input, 200);
@@ -122,7 +122,7 @@ mod tests {
             event(5, Source::Claude, "vendor/unknown-a", 100, "req-2"),
             event(5, Source::Claude, "vendor/unknown-b", 100, "req-3"),
         ];
-        let agg = aggregate(events);
+        let agg = aggregate(&events);
 
         let mut pricing = HashMap::new();
         pricing.insert(

@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::Path;
 
-const LITELLM_PRICING_URL: &str = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+const LITELLM_PRICING_URL: &str =
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
 /// Fetch pricing from `LiteLLM` and write atomically to the cache path.
 /// Returns Ok(()) on success. On failure, returns an error (caller should log).

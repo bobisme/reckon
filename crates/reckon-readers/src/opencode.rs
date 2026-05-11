@@ -18,8 +18,7 @@ const PAGE_LIMIT: usize = 1000;
 const BUSY_RETRY_DELAY: Duration = Duration::from_millis(50);
 const DB_LOCKED_WARNING: &str = "opencode: DB locked, skipping";
 
-const SELECT_SQL: &str =
-    "SELECT id, session_id, tokens_input, tokens_output, tokens_reasoning, \
+const SELECT_SQL: &str = "SELECT id, session_id, tokens_input, tokens_output, tokens_reasoning, \
      tokens_cache_read, tokens_cache_write, model_id, provider_id, created \
      FROM message WHERE created > ?1 ORDER BY created LIMIT 1000";
 
@@ -106,7 +105,9 @@ struct LegacyCacheTokens {
 fn open_connection(db_path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(
         db_path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )?;
     conn.busy_timeout(Duration::ZERO)?;
     Ok(conn)
@@ -229,7 +230,11 @@ fn parse_legacy_message(path: &Path) -> Result<Option<UsageEvent>, ReaderError> 
     Ok(Some(UsageEvent {
         source: Source::OpenCode,
         month: YearMonth::from_utc(message.time.created / 1000),
-        model: model_map::canonical(Source::OpenCode, &message.model_id, Some(&message.provider_id)),
+        model: model_map::canonical(
+            Source::OpenCode,
+            &message.model_id,
+            Some(&message.provider_id),
+        ),
         provider: message.provider_id,
         project: None,
         tokens,
@@ -248,7 +253,12 @@ impl OpenCodeReader {
             let storage_dir = storage_message_dir(&self.db_path);
             let paths = match collect_message_json_paths(&storage_dir) {
                 Ok(paths) => paths,
-                Err(error) => return Outcome::Err(ReaderError::new(format!("walking {}: {error}", storage_dir.display()))),
+                Err(error) => {
+                    return Outcome::Err(ReaderError::new(format!(
+                        "walking {}: {error}",
+                        storage_dir.display()
+                    )));
+                }
             };
 
             for path in paths {
@@ -356,7 +366,8 @@ impl Reader for OpenCodeReader {
     }
 
     async fn scan(&self, cx: &Cx, sink: &Sink) -> Outcome<(), ReaderError> {
-        self.scan_with_warn(cx, sink, |line| eprintln!("{line}")).await
+        self.scan_with_warn(cx, sink, |line| eprintln!("{line}"))
+            .await
     }
 
     fn cache_strategy(&self) -> CacheStrategy {
@@ -369,9 +380,9 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
+    use asupersync::Budget;
     use asupersync::channel::mpsc;
     use asupersync::lab::{LabConfig, LabRuntime};
-    use asupersync::Budget;
     use rusqlite::Connection;
 
     use super::*;
@@ -394,9 +405,15 @@ mod tests {
                 *slot_clone.lock().expect("slot mutex poisoned") = Some(value);
             })
             .expect("create task");
-        runtime.scheduler.lock().schedule(task_id, Budget::INFINITE.priority);
+        runtime
+            .scheduler
+            .lock()
+            .schedule(task_id, Budget::INFINITE.priority);
         runtime.run_until_quiescent();
-        slot.lock().expect("slot mutex poisoned").take().expect("task result")
+        slot.lock()
+            .expect("slot mutex poisoned")
+            .take()
+            .expect("task result")
     }
 
     fn create_message_db(path: &std::path::Path) -> Connection {
@@ -452,7 +469,9 @@ mod tests {
         fs::write(path, json).expect("write legacy message");
     }
 
-    fn run_scan_with_warn(reader: OpenCodeReader) -> (Outcome<(), ReaderError>, Vec<UsageEvent>, Vec<String>) {
+    fn run_scan_with_warn(
+        reader: OpenCodeReader,
+    ) -> (Outcome<(), ReaderError>, Vec<UsageEvent>, Vec<String>) {
         run_on_lab(99, move |cx| {
             Box::pin(async move {
                 let (tx, mut rx) = mpsc::channel(Sink::CAPACITY);
@@ -462,7 +481,10 @@ mod tests {
 
                 let outcome = reader
                     .scan_with_warn(&cx, &sink, move |line| {
-                        warnings_clone.lock().expect("warnings mutex poisoned").push(line.to_string());
+                        warnings_clone
+                            .lock()
+                            .expect("warnings mutex poisoned")
+                            .push(line.to_string());
                     })
                     .await;
 
@@ -477,7 +499,11 @@ mod tests {
                     }
                 }
 
-                (outcome, events, warnings.lock().expect("warnings mutex poisoned").clone())
+                (
+                    outcome,
+                    events,
+                    warnings.lock().expect("warnings mutex poisoned").clone(),
+                )
             })
         })
     }
@@ -555,8 +581,24 @@ mod tests {
         let db_path = tmp.path().join("opencode.db");
         let conn = create_message_db(&db_path);
 
-        insert_row(&conn, "zero-row", "sess-1", (0, 0, 0, 0, 0), "gpt-4o", "openai", 1_000_000);
-        insert_row(&conn, "nonzero-row", "sess-1", (100, 50, 0, 0, 0), "gpt-4o", "openai", 2_000_000);
+        insert_row(
+            &conn,
+            "zero-row",
+            "sess-1",
+            (0, 0, 0, 0, 0),
+            "gpt-4o",
+            "openai",
+            1_000_000,
+        );
+        insert_row(
+            &conn,
+            "nonzero-row",
+            "sess-1",
+            (100, 50, 0, 0, 0),
+            "gpt-4o",
+            "openai",
+            2_000_000,
+        );
         drop(conn);
 
         let reader = OpenCodeReader::with_db_path(db_path);
@@ -613,8 +655,10 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("opencode.db");
         let conn = Connection::open(&db_path).expect("open db");
-        conn.execute_batch("CREATE TABLE message (id TEXT, created INTEGER)").expect("create");
-        conn.execute("INSERT INTO message VALUES ('x', 1000)", []).expect("insert");
+        conn.execute_batch("CREATE TABLE message (id TEXT, created INTEGER)")
+            .expect("create");
+        conn.execute("INSERT INTO message VALUES ('x', 1000)", [])
+            .expect("insert");
         drop(conn);
 
         let conn = open_connection(&db_path).expect("open for test");
@@ -690,7 +734,15 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("opencode.db");
         let conn = create_message_db(&db_path);
-        insert_row(&conn, "locked-row", "sess-1", (100, 20, 0, 0, 0), "gpt-4o", "openai", 1_000_000);
+        insert_row(
+            &conn,
+            "locked-row",
+            "sess-1",
+            (100, 20, 0, 0, 0),
+            "gpt-4o",
+            "openai",
+            1_000_000,
+        );
         drop(conn);
 
         let lock_conn = Connection::open(&db_path).expect("open lock db");
@@ -746,8 +798,24 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("opencode.db");
         let conn = create_message_db(&db_path);
-        insert_row(&conn, "msg-1", "sess-1", (100, 50, 0, 0, 0), "gpt-4o", "openai", 1_000_000);
-        insert_row(&conn, "msg-2", "sess-1", (200, 100, 0, 0, 0), "gpt-4o", "openai", 2_000_000);
+        insert_row(
+            &conn,
+            "msg-1",
+            "sess-1",
+            (100, 50, 0, 0, 0),
+            "gpt-4o",
+            "openai",
+            1_000_000,
+        );
+        insert_row(
+            &conn,
+            "msg-2",
+            "sess-1",
+            (200, 100, 0, 0, 0),
+            "gpt-4o",
+            "openai",
+            2_000_000,
+        );
         drop(conn);
 
         let cache_dir = tempfile::tempdir().expect("cache dir");
@@ -798,7 +866,15 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("opencode.db");
         let conn = create_message_db(&db_path);
-        insert_row(&conn, "msg-1", "sess-1", (100, 50, 0, 0, 0), "gpt-4o", "openai", 1_000_000);
+        insert_row(
+            &conn,
+            "msg-1",
+            "sess-1",
+            (100, 50, 0, 0, 0),
+            "gpt-4o",
+            "openai",
+            1_000_000,
+        );
         drop(conn);
 
         let cache_dir = tempfile::tempdir().expect("cache dir");
@@ -821,7 +897,15 @@ mod tests {
         assert_eq!(events_cold.len(), 1);
 
         let conn = Connection::open(&db_path).expect("reopen db");
-        insert_row(&conn, "msg-2", "sess-1", (300, 150, 0, 0, 0), "gpt-4o", "openai", 2_000_000);
+        insert_row(
+            &conn,
+            "msg-2",
+            "sess-1",
+            (300, 150, 0, 0, 0),
+            "gpt-4o",
+            "openai",
+            2_000_000,
+        );
         drop(conn);
 
         let events_warm: Vec<UsageEvent> = {

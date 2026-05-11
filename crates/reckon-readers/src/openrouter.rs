@@ -17,21 +17,20 @@ use std::thread;
 #[cfg(test)]
 use std::time::Duration;
 
+use asupersync::http::HttpClientBuilder;
 use asupersync::http::h1::http_client::{ClientError, HttpClient};
 use asupersync::http::h1::types::{Method, Response};
-use asupersync::http::HttpClientBuilder;
 use asupersync::sync::{AcquireError, Semaphore};
 use asupersync::{CancelReason, Cx, Outcome};
 use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
 use reckon_core::{ModelSlug, OpenRouterSummary, Source, TokenCounts, UsageEvent, YearMonth};
-use serde::de::{self, Visitor};
 use serde::Deserialize;
+use serde::de::{self, Visitor};
 
 use crate::{CacheStrategy, Reader, ReaderError, Sink, SinkError};
 
-const OPENROUTER_AUTH_ERROR_MESSAGE: &str =
-    "OpenRouter rejected this key ({}). The /activity or /credits endpoint requires a Management API key, not an inference key. Create one at https://openrouter.ai/settings/keys under Management Keys.";
+const OPENROUTER_AUTH_ERROR_MESSAGE: &str = "OpenRouter rejected this key ({}). The /activity or /credits endpoint requires a Management API key, not an inference key. Create one at https://openrouter.ai/settings/keys under Management Keys.";
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai";
 const OPENROUTER_ACTIVITY_DAYS: usize = 30;
 const OPENROUTER_MAX_IN_FLIGHT: usize = 4;
@@ -73,7 +72,11 @@ impl OpenRouterExitCode {
 impl OpenRouterError {
     #[must_use]
     const fn new(kind: OpenRouterErrorKind, status: Option<u16>, message: String) -> Self {
-        Self { kind, status, message }
+        Self {
+            kind,
+            status,
+            message,
+        }
     }
 
     #[must_use]
@@ -104,7 +107,9 @@ pub fn classify_openrouter_response(key: &str, response: &Response) -> Option<Op
             management_api_key_error(key),
         ))
     } else {
-        let body = response.text().map_or_else(|_| String::new(), ToOwned::to_owned);
+        let body = response
+            .text()
+            .map_or_else(|_| String::new(), ToOwned::to_owned);
         Some(OpenRouterError::new(
             OpenRouterErrorKind::Upstream,
             Some(response.status),
@@ -195,8 +200,12 @@ impl OpenRouterReader {
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map_err(|error| ReaderError::new(format!("system clock before unix epoch: {error}")))?;
-        Ok(UtcDate::from_epoch_seconds(i64::try_from(now.as_secs()).expect("unix seconds overflow")))
+            .map_err(|error| {
+                ReaderError::new(format!("system clock before unix epoch: {error}"))
+            })?;
+        Ok(UtcDate::from_epoch_seconds(
+            i64::try_from(now.as_secs()).expect("unix seconds overflow"),
+        ))
     }
 }
 
@@ -243,7 +252,9 @@ impl Reader for OpenRouterReader {
                     );
                 }
                 Err(OpenRouterScanError::Acquire(error)) => {
-                    return Outcome::Err(ReaderError::new(format!("openrouter semaphore: {error}")));
+                    return Outcome::Err(ReaderError::new(format!(
+                        "openrouter semaphore: {error}"
+                    )));
                 }
                 Err(OpenRouterScanError::Http(error)) if error.is_cancelled() => {
                     return Outcome::Cancelled(
@@ -319,7 +330,10 @@ async fn fetch_activity_day(
     }
 
     let payload: ActivityResponse = response.json().map_err(|error| {
-        OpenRouterScanError::Json(format!("parsing OpenRouter activity for {}: {error}", date.ymd()))
+        OpenRouterScanError::Json(format!(
+            "parsing OpenRouter activity for {}: {error}",
+            date.ymd()
+        ))
     })?;
 
     Ok(payload
@@ -330,9 +344,12 @@ async fn fetch_activity_day(
 }
 
 fn default_config_path() -> Option<PathBuf> {
-    env::var("HOME")
-        .ok()
-        .map(|home| PathBuf::from(home).join(".config").join("reckon").join("config.toml"))
+    env::var("HOME").ok().map(|home| {
+        PathBuf::from(home)
+            .join(".config")
+            .join("reckon")
+            .join("config.toml")
+    })
 }
 
 fn resolve_key_inner(
@@ -358,7 +375,9 @@ fn key_from_config(path: Option<&Path>) -> Option<String> {
 fn date_window(today: UtcDate, days: usize) -> Vec<UtcDate> {
     let start = today.days_since_epoch - i64::try_from(days).expect("days overflow") + 1;
     (0..days)
-        .map(|offset| UtcDate::from_days_since_epoch(start + i64::try_from(offset).expect("offset overflow")))
+        .map(|offset| {
+            UtcDate::from_days_since_epoch(start + i64::try_from(offset).expect("offset overflow"))
+        })
         .collect()
 }
 
@@ -377,7 +396,12 @@ impl UtcDate {
 
     const fn from_days_since_epoch(days_since_epoch: i64) -> Self {
         let (year, month, day) = civil_from_days(days_since_epoch);
-        Self { year, month, day, days_since_epoch }
+        Self {
+            year,
+            month,
+            day,
+            days_since_epoch,
+        }
     }
 
     fn ymd(self) -> String {
@@ -587,7 +611,10 @@ mod tests {
     #[test]
     fn only_openrouter_api_key_set() {
         let get = env_from(&[("OPENROUTER_API_KEY", "sk-or-testkey1234")]);
-        assert_eq!(resolve_key_inner(get, None), Some("sk-or-testkey1234".into()));
+        assert_eq!(
+            resolve_key_inner(get, None),
+            Some("sk-or-testkey1234".into())
+        );
     }
 
     #[test]
@@ -596,7 +623,10 @@ mod tests {
             ("RECKON_OPENROUTER_KEY", "sk-or-reckon9999"),
             ("OPENROUTER_API_KEY", "sk-or-generic0000"),
         ]);
-        assert_eq!(resolve_key_inner(get, None), Some("sk-or-reckon9999".into()));
+        assert_eq!(
+            resolve_key_inner(get, None),
+            Some("sk-or-reckon9999".into())
+        );
     }
 
     #[test]
@@ -626,7 +656,10 @@ mod tests {
 
     #[test]
     fn empty_env_values_are_skipped() {
-        let get = env_from(&[("RECKON_OPENROUTER_KEY", ""), ("OPENROUTER_API_KEY", "sk-or-nonempty")]);
+        let get = env_from(&[
+            ("RECKON_OPENROUTER_KEY", ""),
+            ("OPENROUTER_API_KEY", "sk-or-nonempty"),
+        ]);
         assert_eq!(resolve_key_inner(get, None), Some("sk-or-nonempty".into()));
     }
 
@@ -698,10 +731,17 @@ mod tests {
         assert_eq!(first.tokens.cache_write, 0);
         assert_eq!(first.known_cost_usd, Some(0.5));
         assert_eq!(first.byok_usage_inference, Some(true));
-        assert_eq!(first.dedup_key, format!("openrouter:{}:ep-0", dates[0].ymd()));
+        assert_eq!(
+            first.dedup_key,
+            format!("openrouter:{}:ep-0", dates[0].ymd())
+        );
 
         let empty_date = dates[7].ymd();
-        assert!(events.iter().all(|event| !event.dedup_key.contains(&empty_date)));
+        assert!(
+            events
+                .iter()
+                .all(|event| !event.dedup_key.contains(&empty_date))
+        );
     }
 
     #[test]
@@ -783,7 +823,12 @@ mod tests {
                 }
             });
 
-            Self { addr, max_active, shutdown, thread: Some(thread) }
+            Self {
+                addr,
+                max_active,
+                shutdown,
+                thread: Some(thread),
+            }
         }
 
         fn base_url(&self) -> String {
@@ -813,7 +858,11 @@ mod tests {
 
     impl Gate {
         fn new(target: Option<usize>) -> Self {
-            Self { target, state: Mutex::new(false), cvar: Condvar::new() }
+            Self {
+                target,
+                state: Mutex::new(false),
+                cvar: Condvar::new(),
+            }
         }
 
         fn wait_if_needed(&self, active: usize) {

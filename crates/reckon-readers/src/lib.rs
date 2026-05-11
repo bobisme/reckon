@@ -855,9 +855,11 @@ mod tests {
 
         let conn = open_cache(&cache_path);
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM events WHERE dedup_key = 'or:2026-05-01:ep-1'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE dedup_key = 'or:2026-05-01:ep-1'",
+                [],
+                |row| row.get(0),
+            )
             .expect("query count");
         let cost_after: f64 = conn
             .query_row(
@@ -880,11 +882,26 @@ mod tests {
         use crate::openrouter::OpenRouterReader;
         use crate::pi::PiReader;
 
-        assert_eq!(ClaudeReader::new().cache_strategy(), CacheStrategy::JsonlTail);
-        assert_eq!(CodexReader::new().cache_strategy(), CacheStrategy::JsonlTail);
+        assert_eq!(
+            ClaudeReader::new().cache_strategy(),
+            CacheStrategy::JsonlTail
+        );
+        assert_eq!(
+            CodexReader::new().cache_strategy(),
+            CacheStrategy::JsonlTail
+        );
         assert_eq!(PiReader::new().cache_strategy(), CacheStrategy::JsonlTail);
-        assert_eq!(GeminiReader::new().cache_strategy(), CacheStrategy::NeverCache);
-        assert_eq!(OpenCodeReader::new().cache_strategy(), CacheStrategy::SqlCursor);
-        assert_eq!(OpenRouterReader::new().cache_strategy(), CacheStrategy::NeverCache);
+        assert_eq!(
+            GeminiReader::new().cache_strategy(),
+            CacheStrategy::NeverCache
+        );
+        assert_eq!(
+            OpenCodeReader::new().cache_strategy(),
+            CacheStrategy::SqlCursor
+        );
+        assert_eq!(
+            OpenRouterReader::new().cache_strategy(),
+            CacheStrategy::NeverCache
+        );
     }
 }

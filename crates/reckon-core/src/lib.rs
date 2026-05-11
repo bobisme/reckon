@@ -3,7 +3,10 @@ pub mod model_map;
 pub mod pricing;
 
 pub use cache::open_cache;
-pub use pricing::{Pricing, cost, load_pricing, load_pricing_fallback, load_pricing_from_cache, is_pricing_cache_stale};
+pub use pricing::{
+    Pricing, cost, is_pricing_cache_stale, load_pricing, load_pricing_fallback,
+    load_pricing_from_cache,
+};
 
 use std::fmt;
 use std::ops::AddAssign;
@@ -96,18 +99,30 @@ impl YearMonth {
     #[must_use]
     pub const fn next(self) -> Self {
         if self.month == 12 {
-            Self { year: self.year + 1, month: 1 }
+            Self {
+                year: self.year + 1,
+                month: 1,
+            }
         } else {
-            Self { year: self.year, month: self.month + 1 }
+            Self {
+                year: self.year,
+                month: self.month + 1,
+            }
         }
     }
 
     #[must_use]
     pub const fn prev(self) -> Self {
         if self.month == 1 {
-            Self { year: self.year - 1, month: 12 }
+            Self {
+                year: self.year - 1,
+                month: 12,
+            }
         } else {
-            Self { year: self.year, month: self.month - 1 }
+            Self {
+                year: self.year,
+                month: self.month - 1,
+            }
         }
     }
 }
@@ -220,12 +235,33 @@ mod tests {
 
     #[test]
     fn token_counts_total_and_add_assign() {
-        let mut a = TokenCounts { input: 10, output: 20, cache_read: 5, cache_write: 3, reasoning: 2 };
+        let mut a = TokenCounts {
+            input: 10,
+            output: 20,
+            cache_read: 5,
+            cache_write: 3,
+            reasoning: 2,
+        };
         assert_eq!(a.total(), 40);
 
-        let b = TokenCounts { input: 1, output: 2, cache_read: 3, cache_write: 4, reasoning: 5 };
+        let b = TokenCounts {
+            input: 1,
+            output: 2,
+            cache_read: 3,
+            cache_write: 4,
+            reasoning: 5,
+        };
         a += b;
-        assert_eq!(a, TokenCounts { input: 11, output: 22, cache_read: 8, cache_write: 7, reasoning: 7 });
+        assert_eq!(
+            a,
+            TokenCounts {
+                input: 11,
+                output: 22,
+                cache_read: 8,
+                cache_write: 7,
+                reasoning: 7
+            }
+        );
         assert_eq!(a.total(), 55);
     }
 
@@ -277,13 +313,20 @@ mod proptest_roundtrip {
     }
 
     fn arb_token_counts() -> impl Strategy<Value = TokenCounts> {
-        (any::<u64>(), any::<u64>(), any::<u64>(), any::<u64>(), any::<u64>()).prop_map(|(i, o, cr, cw, r)| TokenCounts {
-            input: i,
-            output: o,
-            cache_read: cr,
-            cache_write: cw,
-            reasoning: r,
-        })
+        (
+            any::<u64>(),
+            any::<u64>(),
+            any::<u64>(),
+            any::<u64>(),
+            any::<u64>(),
+        )
+            .prop_map(|(i, o, cr, cw, r)| TokenCounts {
+                input: i,
+                output: o,
+                cache_read: cr,
+                cache_write: cw,
+                reasoning: r,
+            })
     }
 
     proptest! {

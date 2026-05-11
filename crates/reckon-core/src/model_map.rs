@@ -14,9 +14,13 @@ pub fn canonical(source: Source, raw: &str, provider: Option<&str>) -> ModelSlug
         if let Some(slug) = gemini_canonical(raw) {
             return slug;
         }
-    } else if source == Source::OpenCode && let Some(p) = provider {
+    } else if source == Source::OpenCode
+        && let Some(p) = provider
+    {
         return opencode_canonical(p, raw);
-    } else if source == Source::Pi && let Some(p) = provider {
+    } else if source == Source::Pi
+        && let Some(p) = provider
+    {
         return pi_canonical(p, raw);
     }
     ModelSlug(raw.into())

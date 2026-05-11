@@ -231,8 +231,8 @@ fn normalize_vendor(vendor: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use std::fs;
+    use std::path::Path;
     use std::time::SystemTime;
 
     fn fixture() -> HashMap<ModelSlug, Pricing> {
@@ -349,8 +349,7 @@ mod tests {
         let path = dir.path().join("pricing.json");
         fs::write(&path, "{}").expect("write test file");
 
-        let eight_days_ago = SystemTime::now()
-            - std::time::Duration::from_secs(8 * 24 * 60 * 60);
+        let eight_days_ago = SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 60 * 60);
         filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(eight_days_ago))
             .expect("set mtime");
 
@@ -376,7 +375,10 @@ mod tests {
         assert!(merged.contains_key(&ModelSlug::new("anthropic/claude-opus-4.7")));
         let fallback_pricing = load_pricing_fallback();
         for (model, _) in fallback_pricing {
-            assert!(merged.contains_key(&model), "fallback model {model} not in merged pricing");
+            assert!(
+                merged.contains_key(&model),
+                "fallback model {model} not in merged pricing"
+            );
         }
     }
 

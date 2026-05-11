@@ -130,7 +130,9 @@ fn find_session_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
         let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        if path.extension().and_then(|ext| ext.to_str()) == Some("json") && name.starts_with("session-") {
+        if path.extension().and_then(|ext| ext.to_str()) == Some("json")
+            && name.starts_with("session-")
+        {
             files.push(path);
         }
     }
@@ -203,7 +205,9 @@ async fn scan_session_file(
     sink: &Sink,
 ) -> Result<(), ScanError> {
     let contents = fs::read_to_string(path).map_err(ScanError::Io)?;
-    let session: SessionFile = serde_json::from_str(&contents).map_err(io::Error::other).map_err(ScanError::Io)?;
+    let session: SessionFile = serde_json::from_str(&contents)
+        .map_err(io::Error::other)
+        .map_err(ScanError::Io)?;
 
     let fallback_ts = session
         .start_time
@@ -216,7 +220,12 @@ async fn scan_session_file(
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or_else(|| ScanError::Io(io::Error::new(io::ErrorKind::InvalidData, "invalid session filename")))?;
+        .ok_or_else(|| {
+            ScanError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid session filename",
+            ))
+        })?;
 
     for (index, message) in session.messages.into_iter().enumerate() {
         let Some(tokens) = token_counts_from_message(&message) else {
@@ -235,7 +244,9 @@ async fn scan_session_file(
                     .as_ref()
                     .and_then(|id| logs.get(&(id.clone(), index)).copied())
             })
-            .or_else(|| fallback_ts.map(|ts| ts + i64::try_from(index).expect("message index overflow")))
+            .or_else(|| {
+                fallback_ts.map(|ts| ts + i64::try_from(index).expect("message index overflow"))
+            })
             .unwrap_or(0);
 
         let event = UsageEvent {
@@ -254,7 +265,8 @@ async fn scan_session_file(
     }
 
     let metadata = fs::metadata(path).map_err(ScanError::Io)?;
-    let mtime_ns = file_modified_nanos(metadata.modified().map_err(ScanError::Io)?).map_err(ScanError::Io)?;
+    let mtime_ns =
+        file_modified_nanos(metadata.modified().map_err(ScanError::Io)?).map_err(ScanError::Io)?;
     let size_bytes = i64::try_from(metadata.len()).expect("file size too large");
     sink.record_source_file(Source::Gemini, path, mtime_ns, size_bytes, size_bytes);
 
@@ -322,7 +334,11 @@ fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
 
 #[expect(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
 fn civil_to_epoch(y: i32, m: u32, d: u32, h: u32, min: u32, sec: u32) -> i64 {
-    let (y, m) = if m <= 2 { (i64::from(y) - 1, m + 9) } else { (i64::from(y), m - 3) };
+    let (y, m) = if m <= 2 {
+        (i64::from(y) - 1, m + 9)
+    } else {
+        (i64::from(y), m - 3)
+    };
     let era = (if y >= 0 { y } else { y - 399 }) / 400;
     let yoe = (y - era * 400) as u64;
     let doy = (153 * u64::from(m) + 2) / 5 + u64::from(d) - 1;
@@ -427,9 +443,15 @@ mod tests {
                 *slot_clone.lock().expect("slot mutex poisoned") = Some(value);
             })
             .expect("create task");
-        runtime.scheduler.lock().schedule(task_id, Budget::INFINITE.priority);
+        runtime
+            .scheduler
+            .lock()
+            .schedule(task_id, Budget::INFINITE.priority);
         runtime.run_until_quiescent();
-        slot.lock().expect("slot mutex poisoned").take().expect("task result")
+        slot.lock()
+            .expect("slot mutex poisoned")
+            .take()
+            .expect("task result")
     }
 
     #[test]
@@ -440,8 +462,11 @@ mod tests {
         let hash = "17421c9b4a7a4ae5ba7b7ed96deb56b18dda07f3688e2991e5bdbd804aeaab62";
         let chat_dir = root.join("tmp").join(hash).join("chats");
         fs::create_dir_all(&chat_dir).expect("create chats dir");
-        fs::copy(fixture_dir.join("session-sample.json"), chat_dir.join("session-2026-02-19T22-09-ae63ca40.json"))
-            .expect("copy fixture");
+        fs::copy(
+            fixture_dir.join("session-sample.json"),
+            chat_dir.join("session-2026-02-19T22-09-ae63ca40.json"),
+        )
+        .expect("copy fixture");
 
         fs::write(
             root.join("projects.json"),

@@ -1,6 +1,6 @@
+mod pricing_refresh;
 mod render;
 mod report;
-mod pricing_refresh;
 
 use std::collections::HashSet;
 use std::env;
@@ -10,11 +10,11 @@ use std::path::PathBuf;
 use asupersync::Cx;
 use clap::Parser;
 use reckon_core::{
-    load_pricing_from_cache, load_pricing_fallback, is_pricing_cache_stale, ModelSlug,
+    ModelSlug, is_pricing_cache_stale, load_pricing_fallback, load_pricing_from_cache,
 };
 use reckon_readers::claude::ClaudeReader;
 use reckon_readers::gemini::GeminiReader;
-use reckon_readers::{run_readers_with_cache, Reader, openrouter};
+use reckon_readers::{Reader, openrouter, run_readers_with_cache};
 
 #[derive(Parser)]
 #[command(name = "reckon")]
@@ -52,13 +52,21 @@ fn pricing_cache_path() -> PathBuf {
 }
 
 fn format_unknown_model_warning(models: &HashSet<ModelSlug>) -> String {
-    let mut slugs: Vec<String> = models.iter().map(|model| model.as_str().to_string()).collect();
+    let mut slugs: Vec<String> = models
+        .iter()
+        .map(|model| model.as_str().to_string())
+        .collect();
     slugs.sort_unstable();
 
     let listed_count = slugs.len().min(10);
     let mut message = format!(
         "warning: priced at $0 (no pricing data): {}",
-        slugs.iter().take(listed_count).cloned().collect::<Vec<_>>().join(", "),
+        slugs
+            .iter()
+            .take(listed_count)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", "),
     );
 
     if slugs.len() > 10 {
@@ -87,7 +95,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
-        let readers: Vec<Box<dyn Reader>> = vec![Box::new(ClaudeReader::new()), Box::new(GeminiReader::new())];
+        let readers: Vec<Box<dyn Reader>> =
+            vec![Box::new(ClaudeReader::new()), Box::new(GeminiReader::new())];
         let events = run_readers_with_cache(&cx, readers, &cache_path()).await;
 
         let balance = openrouter::fetch_balance().ok().flatten();
@@ -97,10 +106,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         }
 
-        let aggregated = report::aggregate(events);
+        let aggregated = report::aggregate(&events);
         let unknown_models = report::unknown_model_slugs(&aggregated, &pricing);
         if args.json {
-            render::print_json(&aggregated, &pricing, balance.as_ref());
+            render::print_json(&events, &pricing, balance.as_ref());
         } else {
             render::print_table(&aggregated, &pricing, balance.as_ref());
         }
