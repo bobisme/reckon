@@ -27,6 +27,8 @@ enum ColorMode {
     Always,
 }
 
+use report::BySpec;
+
 #[derive(Parser)]
 #[command(name = "reckon")]
 #[command(about = "Monthly AI usage tracker with unsubsidized cost breakdown")]
@@ -58,6 +60,17 @@ struct Cli {
     /// Disable ANSI color output.
     #[arg(long, conflicts_with = "color")]
     no_color: bool,
+
+    /// Comma-separated breakdown dimensions: source, model, provider, project
+    ///
+    /// Controls which columns appear in the output. Default is "source,model".
+    /// Month is always implicit.
+    #[arg(long, default_value = "source,model", value_parser = parse_by_spec)]
+    by: BySpec,
+}
+
+fn parse_by_spec(s: &str) -> Result<BySpec, String> {
+    BySpec::parse(s)
 }
 
 const ANSI_COLOR_RESET: &str = "\x1b[0m";
@@ -273,12 +286,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         }
 
-        let aggregated = report::aggregate(&events);
+        let aggregated = report::aggregate(&events, &args.by);
         let unknown_models = report::unknown_model_slugs(&aggregated, &pricing);
         if args.json {
-            render::print_json(&events, &pricing, balance.as_ref());
+            render::print_json(&events, &pricing, balance.as_ref(), &args.by);
         } else {
-            render::print_table(&aggregated, &pricing, balance.as_ref(), use_color);
+            render::print_table(&aggregated, &pricing, balance.as_ref(), use_color, &args.by);
         }
 
         if !unknown_models.is_empty() {
@@ -371,5 +384,20 @@ mod tests {
     fn should_use_color_preserves_manual_override() {
         assert!(should_use_color(false, ColorMode::Always, false, true));
         assert!(!should_use_color(false, ColorMode::Always, true, false));
+    }
+
+    #[test]
+    fn parse_by_spec_invalid_exits_with_error() {
+        assert!(parse_by_spec("foo").is_err());
+        assert!(parse_by_spec("source,foo").is_err());
+    }
+
+    #[test]
+    fn parse_by_spec_valid_cases() {
+        assert!(parse_by_spec("source").is_ok());
+        assert!(parse_by_spec("model").is_ok());
+        assert!(parse_by_spec("source,model").is_ok());
+        assert!(parse_by_spec("source,model,project").is_ok());
+        assert!(parse_by_spec("source,model,provider,project").is_ok());
     }
 }

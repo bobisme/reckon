@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use reckon_core::{
-    ModelSlug, OpenRouterSummary, Pricing, Source, TokenCounts, UsageEvent, YearMonth, cost,
+    cost, ModelSlug, OpenRouterSummary, Pricing, Source, TokenCounts, UsageEvent, YearMonth,
 };
-use serde::Serialize;
+use serde_json::Value;
+use tabled::builder::Builder;
 use tabled::settings::object::Columns;
 use tabled::settings::{Alignment, Style};
-use tabled::{Table, Tabled};
+
+use crate::report::{month_totals, AggregateKey, BySpec, Dimension};
 
 const ANSI_COLOR_RESET: &str = "\x1b[0m";
 const ANSI_BLUE: &str = "\x1b[36m";
@@ -20,84 +22,71 @@ fn colorize(text: &str, ansi_code: &str, enabled: bool) -> String {
     }
 }
 
-use crate::report::{AggregateKey, month_totals};
-
-#[derive(Tabled)]
-struct Row {
-    #[tabled(rename = "Month")]
-    month: String,
-    #[tabled(rename = "Source")]
-    source: String,
-    #[tabled(rename = "Model")]
-    model: String,
-    #[tabled(rename = "In")]
-    input: String,
-    #[tabled(rename = "Out")]
-    output: String,
-    #[tabled(rename = "Cache")]
-    cache: String,
-    #[tabled(rename = "Reason")]
-    reason: String,
-    #[tabled(rename = "Cost")]
-    cost_usd: String,
-}
-
 pub fn print_table(
     aggregated: &BTreeMap<AggregateKey, TokenCounts>,
     pricing: &HashMap<ModelSlug, Pricing>,
     balance: Option<&OpenRouterSummary>,
     use_color: bool,
+    by: &BySpec,
 ) {
     let totals = month_totals(aggregated);
     let months: Vec<YearMonth> = totals.keys().copied().collect();
 
-    let mut rows = Vec::new();
+    let mut header: Vec<String> = vec!["Month".into()];
+    if by.has(&Dimension::Source) {
+        header.push("Source".into());
+    }
+    if by.has(&Dimension::Model) {
+        header.push("Model".into());
+    }
+    if by.has(&Dimension::Provider) {
+        header.push("Provider".into());
+    }
+    if by.has(&Dimension::Project) {
+        header.push("Project".into());
+    }
+    let num_dim_cols = header.len() - 1;
+    let token_col_start = header.len();
+    header.extend(["In", "Out", "Cache", "Reason", "Cost"].map(String::from));
+    let total_cols = header.len();
+
+    let mut builder = Builder::default();
+    builder.push_record(header);
+
     for month in months.iter().rev() {
-        let month_rows: Vec<_> = aggregated
-            .range(
-                (*month, Source::Claude, ModelSlug::new(""))
-                    ..=(*month, Source::OpenRouter, ModelSlug::new("\u{10FFFF}")),
-            )
+        let mut month_entries: Vec<_> = aggregated
+            .iter()
+            .filter(|(key, _)| key.month == *month)
             .collect();
+        month_entries.sort_by_key(|(key, _)| (*key).clone());
 
-        for ((_, source, model), tokens) in &month_rows {
-            let model_cost = pricing.get(model).map_or(0.0, |p| cost(tokens, p));
-
-            rows.push(Row {
-                month: month.to_string(),
-                source: source.to_string(),
-                model: model.to_string(),
-                input: fmt_thousands(tokens.input),
-                output: fmt_thousands(tokens.output),
-                cache: fmt_thousands(tokens.cache_read),
-                reason: fmt_thousands(tokens.reasoning),
-                cost_usd: fmt_cost(model_cost),
-            });
+        for (key, tokens) in &month_entries {
+            let model_cost = key
+                .model
+                .as_ref()
+                .and_then(|m| pricing.get(m))
+                .map_or(0.0, |p| cost(tokens, p));
+            builder.push_record(build_data_row(by, *month, key, tokens, model_cost));
         }
 
         let total_tokens = &totals[month];
-        let total_cost: f64 = month_rows
+        let total_cost: f64 = month_entries
             .iter()
-            .map(|((_, _, model), tokens)| pricing.get(model).map_or(0.0, |p| cost(tokens, p)))
+            .map(|(key, tokens)| {
+                key.model
+                    .as_ref()
+                    .and_then(|m| pricing.get(m))
+                    .map_or(0.0, |p| cost(tokens, p))
+            })
             .sum();
-
-        rows.push(Row {
-            month: month.to_string(),
-            source: "TOTAL".into(),
-            model: String::new(),
-            input: fmt_thousands(total_tokens.input),
-            output: fmt_thousands(total_tokens.output),
-            cache: fmt_thousands(total_tokens.cache_read),
-            reason: fmt_thousands(total_tokens.reasoning),
-            cost_usd: fmt_cost(total_cost),
-        });
+        builder.push_record(build_total_row(*month, num_dim_cols, total_tokens, total_cost));
     }
 
-    let mut table = Table::new(rows);
-    table
-        .with(Style::blank())
-        .modify(Columns::new(3..=6), Alignment::right())
-        .modify(Columns::single(7), Alignment::right());
+    let mut table = builder.build();
+    table.with(Style::blank());
+    for col in token_col_start..total_cols {
+        table.modify(Columns::single(col), Alignment::right());
+    }
 
     println!("{}", colorize(&table.to_string(), ANSI_BLUE, use_color));
 
@@ -107,6 +96,52 @@ pub fn print_table(
             colorize(&fmt_balance(summary), ANSI_GREEN, use_color)
         );
     }
+}
+
+fn build_data_row(
+    by: &BySpec,
+    month: YearMonth,
+    key: &AggregateKey,
+    tokens: &TokenCounts,
+    cost_usd: f64,
+) -> Vec<String> {
+    let mut row = vec![month.to_string()];
+    if by.has(&Dimension::Source) {
+        row.push(key.source.as_ref().map_or_else(String::new, ToString::to_string));
+    }
+    if by.has(&Dimension::Model) {
+        row.push(key.model.as_ref().map_or_else(String::new, ToString::to_string));
+    }
+    if by.has(&Dimension::Provider) {
+        row.push(key.provider.as_deref().unwrap_or("").to_string());
+    }
+    if by.has(&Dimension::Project) {
+        row.push(key.project.as_deref().unwrap_or("").to_string());
+    }
+    row.push(fmt_thousands(tokens.input));
+    row.push(fmt_thousands(tokens.output));
+    row.push(fmt_thousands(tokens.cache_read));
+    row.push(fmt_thousands(tokens.reasoning));
+    row.push(fmt_cost(cost_usd));
+    row
+}
+
+fn build_total_row(
+    month: YearMonth,
+    num_dim_cols: usize,
+    tokens: &TokenCounts,
+    cost_usd: f64,
+) -> Vec<String> {
+    let mut row = vec![month.to_string()];
+    for i in 0..num_dim_cols {
+        row.push(if i == 0 { "TOTAL".into() } else { String::new() });
+    }
+    row.push(fmt_thousands(tokens.input));
+    row.push(fmt_thousands(tokens.output));
+    row.push(fmt_thousands(tokens.cache_read));
+    row.push(fmt_thousands(tokens.reasoning));
+    row.push(fmt_cost(cost_usd));
+    row
 }
 
 fn fmt_thousands(n: u64) -> String {
@@ -136,23 +171,6 @@ fn fmt_balance(summary: &OpenRouterSummary) -> String {
     )
 }
 
-#[derive(Serialize)]
-struct JsonRow {
-    month: String,
-    source: String,
-    model: String,
-    provider: String,
-    project: String,
-    input: u64,
-    output: u64,
-    cache_read: u64,
-    cache_write: u64,
-    reasoning: u64,
-    cost_usd: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    known_cost_usd: Option<f64>,
-}
-
 #[derive(Default)]
 struct JsonAggregate {
     tokens: TokenCounts,
@@ -163,6 +181,7 @@ struct JsonAggregate {
 
 fn aggregate_for_json(
     events: &[UsageEvent],
+    by: &BySpec,
 ) -> (
     BTreeMap<AggregateKey, JsonAggregate>,
     BTreeMap<YearMonth, TokenCounts>,
@@ -176,7 +195,15 @@ fn aggregate_for_json(
             continue;
         }
 
-        let key = (event.month, event.source, event.model.clone());
+        let key = AggregateKey {
+            month: event.month,
+            source: by.has(&Dimension::Source).then_some(event.source),
+            model: by.has(&Dimension::Model).then_some(event.model.clone()),
+            provider: by.has(&Dimension::Provider).then(|| event.provider.clone()),
+            project: by
+                .has(&Dimension::Project)
+                .then(|| event.project.clone().unwrap_or_default()),
+        };
         let bucket = aggregated.entry(key).or_default();
         bucket.tokens += event.tokens;
         if bucket.provider.is_empty() {
@@ -198,84 +225,106 @@ fn aggregate_for_json(
     (aggregated, totals)
 }
 
+fn insert_token_fields(obj: &mut serde_json::Map<String, Value>, tokens: &TokenCounts, cost_usd: f64) {
+    obj.insert("input".into(), Value::Number(tokens.input.into()));
+    obj.insert("output".into(), Value::Number(tokens.output.into()));
+    obj.insert("cache_read".into(), Value::Number(tokens.cache_read.into()));
+    obj.insert("cache_write".into(), Value::Number(tokens.cache_write.into()));
+    obj.insert("reasoning".into(), Value::Number(tokens.reasoning.into()));
+    obj.insert(
+        "cost_usd".into(),
+        serde_json::Number::from_f64(cost_usd).map_or(Value::Null, Value::Number),
+    );
+}
+
+fn build_json_data_row(
+    by: &BySpec,
+    month: YearMonth,
+    key: &AggregateKey,
+    bucket: &JsonAggregate,
+    model_cost: f64,
+) -> Value {
+    let mut obj = serde_json::Map::new();
+    obj.insert("month".into(), Value::String(month.to_string()));
+    if by.has(&Dimension::Source) {
+        obj.insert(
+            "source".into(),
+            key.source.as_ref().map_or(Value::Null, |s| Value::String(s.to_string())),
+        );
+    }
+    if by.has(&Dimension::Model) {
+        obj.insert(
+            "model".into(),
+            key.model.as_ref().map_or(Value::Null, |m| Value::String(m.to_string())),
+        );
+    }
+    if by.has(&Dimension::Provider) {
+        obj.insert("provider".into(), Value::String(bucket.provider.clone()));
+    }
+    if by.has(&Dimension::Project) {
+        obj.insert("project".into(), Value::String(bucket.project.clone()));
+    }
+    insert_token_fields(&mut obj, &bucket.tokens, model_cost);
+    if let Some(known) = bucket.known_cost_usd {
+        obj.insert(
+            "known_cost_usd".into(),
+            serde_json::Number::from_f64(known).map_or(Value::Null, Value::Number),
+        );
+    }
+    Value::Object(obj)
+}
+
 pub fn print_json(
     events: &[UsageEvent],
     pricing: &HashMap<ModelSlug, Pricing>,
     balance: Option<&OpenRouterSummary>,
+    by: &BySpec,
 ) {
-    let (aggregated, totals) = aggregate_for_json(events);
+    let (aggregated, totals) = aggregate_for_json(events, by);
     let months: Vec<YearMonth> = totals.keys().copied().collect();
+    let mut rows: Vec<Value> = Vec::new();
 
-    let mut output: Vec<serde_json::Value> = Vec::new();
     for month in months.iter().rev() {
-        let month_rows: Vec<_> = aggregated
-            .range(
-                (*month, Source::Claude, ModelSlug::new(""))
-                    ..=(*month, Source::OpenRouter, ModelSlug::new("\u{10FFFF}")),
-            )
+        let mut month_entries: Vec<_> = aggregated
+            .iter()
+            .filter(|(key, _)| key.month == *month)
             .collect();
+        month_entries.sort_by_key(|(key, _)| (*key).clone());
 
-        for ((_, source, model), bucket) in &month_rows {
-            let model_cost = pricing.get(model).map_or(0.0, |p| cost(&bucket.tokens, p));
-            let known_cost_usd = if *source == Source::OpenRouter {
-                bucket.known_cost_usd
-            } else {
-                None
-            };
-
-            output.push(
-                serde_json::to_value(JsonRow {
-                    month: month.to_string(),
-                    source: source.to_string(),
-                    model: model.to_string(),
-                    provider: bucket.provider.clone(),
-                    project: bucket.project.clone(),
-                    input: bucket.tokens.input,
-                    output: bucket.tokens.output,
-                    cache_read: bucket.tokens.cache_read,
-                    cache_write: bucket.tokens.cache_write,
-                    reasoning: bucket.tokens.reasoning,
-                    cost_usd: model_cost,
-                    known_cost_usd,
-                })
-                .expect("json row serialization"),
-            );
+        for (key, bucket) in &month_entries {
+            let model_cost = key
+                .model
+                .as_ref()
+                .and_then(|m| pricing.get(m))
+                .map_or(0.0, |p| cost(&bucket.tokens, p));
+            rows.push(build_json_data_row(by, *month, key, bucket, model_cost));
         }
 
         let total_tokens = &totals[month];
-        let total_cost: f64 = month_rows
+        let total_cost: f64 = month_entries
             .iter()
-            .map(|((_, _, model), bucket)| {
-                pricing.get(model).map_or(0.0, |p| cost(&bucket.tokens, p))
+            .map(|(key, bucket)| {
+                key.model
+                    .as_ref()
+                    .and_then(|m| pricing.get(m))
+                    .map_or(0.0, |p| cost(&bucket.tokens, p))
             })
             .sum();
 
-        output.push(
-            serde_json::to_value(JsonRow {
-                month: month.to_string(),
-                source: "TOTAL".into(),
-                model: String::new(),
-                provider: String::new(),
-                project: String::new(),
-                input: total_tokens.input,
-                output: total_tokens.output,
-                cache_read: total_tokens.cache_read,
-                cache_write: total_tokens.cache_write,
-                reasoning: total_tokens.reasoning,
-                cost_usd: total_cost,
-                known_cost_usd: None,
-            })
-            .expect("json row serialization"),
-        );
+        let mut total_obj = serde_json::Map::new();
+        total_obj.insert("month".into(), Value::String(month.to_string()));
+        total_obj.insert("source".into(), Value::String("TOTAL".into()));
+        insert_token_fields(&mut total_obj, total_tokens, total_cost);
+        rows.push(Value::Object(total_obj));
     }
 
     if let Some(summary) = balance {
-        output.push(serde_json::json!({"openrouter_balance": summary}));
+        rows.push(serde_json::json!({"openrouter_balance": summary}));
     }
 
     println!(
         "{}",
-        serde_json::to_string_pretty(&output).expect("json serialization")
+        serde_json::to_string_pretty(&rows).expect("json serialization")
     );
 }
 
