@@ -18,7 +18,7 @@ insta = { version = "1", features = ["json"] }
 reckon-core = { path = "../reckon-core" }
 reckon-readers = { path = "../reckon-readers" }
 asupersync = { version = "0.2", features = ["tls", "tls-webpki-roots", "proc-macros"] }
-tabled = "0.18"
+tabled = { version = "0.18", features = ["ansi"] }
 minreq = { version = "2", features = ["https"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
