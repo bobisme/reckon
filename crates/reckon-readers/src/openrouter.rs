@@ -190,10 +190,14 @@ struct CreditsData {
     total_usage: f64,
 }
 
-pub async fn fetch_balance() -> Result<Option<OpenRouterSummary>, Box<dyn std::error::Error>> {
-    let key = match resolve_key() {
-        Some(k) => k,
-        None => return Ok(None),
+/// Fetch the current `OpenRouter` credit balance via the Management API.
+///
+/// # Errors
+///
+/// Returns an error on HTTP failures or if the key is rejected.
+pub fn fetch_balance() -> Result<Option<OpenRouterSummary>, Box<dyn std::error::Error>> {
+    let Some(key) = resolve_key() else {
+        return Ok(None);
     };
 
     let url = "https://openrouter.ai/api/v1/credits";
@@ -221,7 +225,7 @@ pub async fn fetch_balance() -> Result<Option<OpenRouterSummary>, Box<dyn std::e
     let duration = now.duration_since(SystemTime::UNIX_EPOCH)?;
     let secs = duration.as_secs();
     let nanos = duration.subsec_nanos();
-    let ts_str = format!("{}.{:09}Z", secs, nanos);
+    let ts_str = format!("{secs}.{nanos:09}Z");
 
     Ok(Some(OpenRouterSummary {
         total_credits: parsed.data.total_credits,

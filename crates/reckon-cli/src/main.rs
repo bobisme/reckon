@@ -90,7 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let readers: Vec<Box<dyn Reader>> = vec![Box::new(ClaudeReader::new()), Box::new(GeminiReader::new())];
         let events = run_readers_with_cache(&cx, readers, &cache_path()).await;
 
-        let balance = openrouter::fetch_balance().await.ok().flatten();
+        let balance = openrouter::fetch_balance().ok().flatten();
 
         if events.is_empty() {
             println!("No usage events found.");
