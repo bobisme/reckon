@@ -4,6 +4,7 @@ mod pricing_refresh;
 
 use std::collections::HashSet;
 use std::env;
+use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use asupersync::Cx;
@@ -41,7 +42,7 @@ fn format_unknown_model_warning(models: &HashSet<ModelSlug>) -> String {
     );
 
     if slugs.len() > 10 {
-        message.push_str(&format!(" (and {} more)", slugs.len() - 10));
+        let _ = write!(message, " (and {} more)", slugs.len() - 10);
     }
 
     message
