@@ -10,6 +10,7 @@ pub use pricing::{
 
 use std::fmt;
 use std::ops::AddAssign;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
@@ -130,6 +131,26 @@ impl YearMonth {
 impl fmt::Display for YearMonth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:04}-{:02}", self.year, self.month)
+    }
+}
+
+impl FromStr for YearMonth {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (y, m) = s
+            .split_once('-')
+            .ok_or_else(|| format!("expected YYYY-MM, got '{s}'"))?;
+        let year: i32 = y
+            .parse()
+            .map_err(|_| format!("invalid year in '{s}'"))?;
+        let month: u8 = m
+            .parse()
+            .map_err(|_| format!("invalid month in '{s}'"))?;
+        if !(1..=12).contains(&month) {
+            return Err(format!("month must be 1-12, got {month} in '{s}'"));
+        }
+        Ok(Self { year, month })
     }
 }
 
@@ -289,6 +310,21 @@ mod tests {
         // 1969-12-31T23:59:59Z
         let ym = YearMonth::from_utc(-1);
         assert_eq!(ym, YearMonth::new(1969, 12));
+    }
+
+    #[test]
+    fn yearmonth_from_str_roundtrip() {
+        let ym = YearMonth::new(2026, 5);
+        let parsed: YearMonth = ym.to_string().parse().unwrap();
+        assert_eq!(ym, parsed);
+    }
+
+    #[test]
+    fn yearmonth_from_str_rejects_bad_input() {
+        assert!("2026".parse::<YearMonth>().is_err());
+        assert!("abc-05".parse::<YearMonth>().is_err());
+        assert!("2026-00".parse::<YearMonth>().is_err());
+        assert!("2026-13".parse::<YearMonth>().is_err());
     }
 }
 

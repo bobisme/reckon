@@ -12,6 +12,7 @@ use asupersync::Cx;
 use clap::{Parser, ValueEnum};
 use reckon_core::{
     load_pricing_from_cache, load_pricing_fallback, is_pricing_cache_stale, ModelSlug, Source,
+    YearMonth,
 };
 use reckon_readers::claude::ClaudeReader;
 use reckon_readers::codex::CodexReader;
@@ -67,10 +68,62 @@ struct Cli {
     /// Month is always implicit.
     #[arg(long, default_value = "source,model", value_parser = parse_by_spec)]
     by: BySpec,
+
+    /// Show only a single month (YYYY-MM)
+    #[arg(long, conflicts_with_all = ["since", "until"])]
+    month: Option<YearMonth>,
+
+    /// Start of date range, inclusive (YYYY-MM)
+    #[arg(long)]
+    since: Option<YearMonth>,
+
+    /// End of date range, inclusive (YYYY-MM)
+    #[arg(long)]
+    until: Option<YearMonth>,
 }
 
 fn parse_by_spec(s: &str) -> Result<BySpec, String> {
     BySpec::parse(s)
+}
+
+#[derive(Debug)]
+struct MonthFilter {
+    since: YearMonth,
+    until: YearMonth,
+}
+
+impl MonthFilter {
+    fn matches(&self, month: YearMonth) -> bool {
+        month >= self.since && month <= self.until
+    }
+}
+
+fn resolve_month_filter(
+    month: Option<YearMonth>,
+    since: Option<YearMonth>,
+    until: Option<YearMonth>,
+) -> Result<Option<MonthFilter>, String> {
+    if let Some(m) = month {
+        return Ok(Some(MonthFilter { since: m, until: m }));
+    }
+    match (since, until) {
+        (None, None) => Ok(None),
+        (Some(s), Some(u)) => {
+            if s > u {
+                Err("--since must be <= --until".into())
+            } else {
+                Ok(Some(MonthFilter { since: s, until: u }))
+            }
+        }
+        (Some(s), None) => Ok(Some(MonthFilter {
+            since: s,
+            until: YearMonth::new(9999, 12),
+        })),
+        (None, Some(u)) => Ok(Some(MonthFilter {
+            since: YearMonth::new(1, 1),
+            until: u,
+        })),
+    }
 }
 
 const ANSI_COLOR_RESET: &str = "\x1b[0m";
@@ -204,6 +257,14 @@ fn color_warning(text: &str, use_color: bool) -> String {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
+    let month_filter = match resolve_month_filter(args.month, args.since, args.until) {
+        Ok(f) => f,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            std::process::exit(1);
+        }
+    };
+
     let requested_sources = args.source.as_ref().map_or_else(
         || {
             let all_sources = [
@@ -277,7 +338,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
 
-        let events = run_readers_with_cache(&cx, readers, &cache_path()).await;
+        let mut events = run_readers_with_cache(&cx, readers, &cache_path()).await;
+
+        if let Some(ref filter) = month_filter {
+            events.retain(|e| filter.matches(e.month));
+        }
 
         let balance = openrouter::fetch_balance().ok().flatten();
 
@@ -399,5 +464,101 @@ mod tests {
         assert!(parse_by_spec("source,model").is_ok());
         assert!(parse_by_spec("source,model,project").is_ok());
         assert!(parse_by_spec("source,model,provider,project").is_ok());
+    }
+
+    #[test]
+    fn yearmonth_from_str_valid() {
+        let ym: YearMonth = "2026-05".parse().unwrap();
+        assert_eq!(ym.year, 2026);
+        assert_eq!(ym.month, 5);
+    }
+
+    #[test]
+    fn yearmonth_from_str_january() {
+        let ym: YearMonth = "2025-01".parse().unwrap();
+        assert_eq!(ym.year, 2025);
+        assert_eq!(ym.month, 1);
+    }
+
+    #[test]
+    fn yearmonth_from_str_invalid_format() {
+        assert!("2026".parse::<YearMonth>().is_err());
+        assert!("not-a-date".parse::<YearMonth>().is_err());
+        assert!("2026-13".parse::<YearMonth>().is_err());
+        assert!("2026-00".parse::<YearMonth>().is_err());
+    }
+
+    #[test]
+    fn month_filter_single_month() {
+        let f = resolve_month_filter(
+            Some(YearMonth::new(2026, 5)),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(f.matches(YearMonth::new(2026, 5)));
+        assert!(!f.matches(YearMonth::new(2026, 4)));
+        assert!(!f.matches(YearMonth::new(2026, 6)));
+    }
+
+    #[test]
+    fn month_filter_range() {
+        let f = resolve_month_filter(
+            None,
+            Some(YearMonth::new(2026, 1)),
+            Some(YearMonth::new(2026, 4)),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(f.matches(YearMonth::new(2026, 1)));
+        assert!(f.matches(YearMonth::new(2026, 2)));
+        assert!(f.matches(YearMonth::new(2026, 4)));
+        assert!(!f.matches(YearMonth::new(2025, 12)));
+        assert!(!f.matches(YearMonth::new(2026, 5)));
+    }
+
+    #[test]
+    fn month_filter_since_only() {
+        let f = resolve_month_filter(
+            None,
+            Some(YearMonth::new(2026, 3)),
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(!f.matches(YearMonth::new(2026, 2)));
+        assert!(f.matches(YearMonth::new(2026, 3)));
+        assert!(f.matches(YearMonth::new(2030, 12)));
+    }
+
+    #[test]
+    fn month_filter_until_only() {
+        let f = resolve_month_filter(
+            None,
+            None,
+            Some(YearMonth::new(2026, 6)),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(f.matches(YearMonth::new(2020, 1)));
+        assert!(f.matches(YearMonth::new(2026, 6)));
+        assert!(!f.matches(YearMonth::new(2026, 7)));
+    }
+
+    #[test]
+    fn month_filter_none_means_all() {
+        assert!(resolve_month_filter(None, None, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn month_filter_since_after_until_errors() {
+        let result = resolve_month_filter(
+            None,
+            Some(YearMonth::new(2026, 4)),
+            Some(YearMonth::new(2026, 1)),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--since must be <= --until"));
     }
 }
