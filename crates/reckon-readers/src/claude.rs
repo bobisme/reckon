@@ -117,14 +117,31 @@ impl Reader for ClaudeReader {
 
 fn find_jsonl_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    collect_jsonl_recursive(dir, &mut files);
+    Ok(files)
+}
+
+fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries {
+        let Ok(entry) = entry else { continue };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
+        if file_type.is_dir() {
+            collect_jsonl_recursive(&path, files);
+        } else if file_type.is_file()
+            && path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        {
             files.push(path);
         }
     }
-    Ok(files)
 }
 
 enum ScanError {
@@ -408,6 +425,53 @@ mod tests {
             .find(|e| e.dedup_key == "req_003")
             .expect("req_003");
         assert_eq!(e2.model.as_str(), "anthropic/claude-opus-4.7");
+    }
+
+    #[test]
+    fn recursively_scans_subagent_jsonls() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let project_dir = tmp.path().join("projects").join("-test-project");
+        let subagents_dir = project_dir.join("sess1").join("subagents");
+        fs::create_dir_all(&subagents_dir).expect("create subagents dir");
+
+        let make_line = |req_id: &str, secs: u32| {
+            format!(
+                "{{\"parentUuid\":null,\"isSidechain\":false,\"message\":{{\"model\":\"claude-sonnet-4-6-20250514\",\"usage\":{{\"input_tokens\":100,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"output_tokens\":50}},\"id\":\"msg_{req_id}\"}},\"requestId\":\"{req_id}\",\"type\":\"assistant\",\"uuid\":\"uuid-{req_id}\",\"timestamp\":\"2026-05-11T10:00:{secs:02}.000Z\",\"sessionId\":\"sess1\"}}\n"
+            )
+        };
+
+        fs::write(project_dir.join("abc.jsonl"), make_line("req_A", 1)).expect("write top jsonl");
+        fs::write(subagents_dir.join("agent-xxx.jsonl"), make_line("req_B", 2))
+            .expect("write agent-xxx jsonl");
+        fs::write(subagents_dir.join("agent-yyy.jsonl"), make_line("req_C", 3))
+            .expect("write agent-yyy jsonl");
+
+        let reader = ClaudeReader::with_root(tmp.path().to_path_buf());
+
+        let events: Vec<UsageEvent> = run_on_lab(7, move |cx| {
+            Box::pin(async move { run_readers(&cx, vec![Box::new(reader)]).await })
+        });
+
+        assert_eq!(
+            events.len(),
+            3,
+            "expected 3 events from recursive scan, got {}: {events:?}",
+            events.len()
+        );
+
+        let expected_project = decode_project_name("-test-project");
+        for e in &events {
+            assert_eq!(
+                e.project.as_deref(),
+                Some(expected_project.as_str()),
+                "all events should share the top-level project name"
+            );
+        }
+
+        let dedup_keys: HashSet<&str> = events.iter().map(|e| e.dedup_key.as_str()).collect();
+        assert!(dedup_keys.contains("req_A"), "missing req_A (top-level)");
+        assert!(dedup_keys.contains("req_B"), "missing req_B (subagents/xxx)");
+        assert!(dedup_keys.contains("req_C"), "missing req_C (subagents/yyy)");
     }
 
     #[test]
