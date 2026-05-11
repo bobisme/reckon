@@ -20,7 +20,7 @@ use reckon_readers::{run_readers_with_cache, Reader};
 #[command(about = "Monthly AI usage tracker with unsubsidized cost breakdown")]
 #[command(long_about = None)]
 struct Cli {
-    /// Disable automatic pricing refresh from LiteLLM
+    /// Disable automatic pricing refresh from `LiteLLM`
     ///
     /// When set, pricing loads from ~/.cache/reckon/pricing.json if present,
     /// otherwise falls back to the vendored snapshot. No network requests are made.
