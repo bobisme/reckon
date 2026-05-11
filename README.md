@@ -161,6 +161,31 @@ opencode_home = "~/.local/share/opencode"
 Environment variables (`CLAUDE_HOME`, `CODEX_HOME`, etc.) override the
 config file.
 
+## Performance benchmarking
+
+The warm cache benchmark measures reckon's performance on a typical run
+with an existing index. Run it locally with:
+
+```bash
+./scripts/bench-warm.sh
+```
+
+**Results:**
+- Target: warm cache run completes in < 200ms
+- Regression threshold: fails if > 300ms (protects against severe slowdowns during development)
+- Current: measured on each run; should improve as readers are optimized and all sources are integrated
+
+Benchmark prerequisites:
+- `hyperfine` installed (macOS: `brew install hyperfine`; Ubuntu/Debian: `apt install hyperfine`)
+- `cargo build --release` has been run at least once
+
+The benchmark:
+1. Builds the release binary if needed
+2. Runs 3 warmup iterations to stabilize the cache
+3. Measures 10 actual runs
+4. Uses `--offline` mode to avoid network variance
+5. Reports mean execution time and regression status
+
 ## Architecture notes
 
 - **Runtime:** [`asupersync`](https://crates.io/crates/asupersync) for
