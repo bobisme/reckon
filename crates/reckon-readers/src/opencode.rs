@@ -854,7 +854,8 @@ mod tests {
         };
         let elapsed = start.elapsed();
 
-        assert_eq!(events_warm.len(), 0);
+        // Warm scan emits zero NEW rows but replays the 2 persisted events.
+        assert_eq!(events_warm.len(), 2);
         assert!(
             elapsed.as_millis() < 50,
             "warm scan took {elapsed:?}, expected < 50ms"
@@ -923,8 +924,17 @@ mod tests {
             })
         };
 
-        assert_eq!(events_warm.len(), 1);
-        assert_eq!(events_warm[0].dedup_key, "msg-2");
-        assert_eq!(events_warm[0].tokens.input, 300);
+        // Warm scan emits 1 new row but replays the 1 persisted event = 2 total.
+        assert_eq!(events_warm.len(), 2);
+        let msg2 = events_warm
+            .iter()
+            .find(|e| e.dedup_key == "msg-2")
+            .expect("new row present");
+        assert_eq!(msg2.tokens.input, 300);
+        let msg1 = events_warm
+            .iter()
+            .find(|e| e.dedup_key == "msg-1")
+            .expect("persisted row replayed");
+        assert_eq!(msg1.tokens.input, 100);
     }
 }

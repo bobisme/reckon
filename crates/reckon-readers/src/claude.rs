@@ -622,7 +622,10 @@ mod tests {
                 })
             }
         });
-        assert_eq!(second_count, 20);
+        // Second scan: 20 freshly read + 100 replayed from cache = 120 total.
+        // The JSONL tail must still be read (>= 1 open) but cached events are
+        // replayed so totals don't decay to deltas.
+        assert_eq!(second_count, 120);
         assert!(jsonl_open_count() >= 1);
 
         reset_jsonl_open_count();
@@ -638,7 +641,9 @@ mod tests {
                 })
             }
         });
-        assert_eq!(third_count, 0);
+        // Third scan: file unchanged, no JSONL opens needed, but all 120 cached
+        // events are replayed.
+        assert_eq!(third_count, 120);
         assert_eq!(jsonl_open_count(), 0);
     }
 

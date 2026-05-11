@@ -936,7 +936,9 @@ mod tests {
                 })
             }
         });
-        assert_eq!(second_count, 0);
+        // Second scan emits 0 new events (session file removed, index unchanged)
+        // but replays the 3 persisted events from the cache.
+        assert_eq!(second_count, 3);
     }
 
     #[test]

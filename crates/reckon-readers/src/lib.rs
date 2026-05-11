@@ -10,6 +10,7 @@ use std::fmt;
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use asupersync::channel::mpsc;
@@ -17,7 +18,7 @@ use asupersync::{Cx, Outcome};
 use async_trait::async_trait;
 use futures::future;
 use futures::stream::{FuturesUnordered, StreamExt};
-use reckon_core::{Source, UsageEvent, open_cache};
+use reckon_core::{ModelSlug, Source, TokenCounts, UsageEvent, YearMonth, open_cache};
 use rusqlite::params;
 
 use rusqlite::Connection;
@@ -374,6 +375,71 @@ fn load_source_files(conn: &Connection) -> HashMap<(Source, String), SourceFileS
     source_files
 }
 
+fn load_events(conn: &Connection) -> Vec<UsageEvent> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT source, dedup_key, month, model, provider, project, \
+             input, output, cache_read, cache_write, reasoning, \
+             known_cost_usd, byok_usage_inference FROM events",
+        )
+        .expect("prepare events query");
+    let rows = stmt
+        .query_map([], |row| {
+            let source: String = row.get(0)?;
+            let source = match source.as_str() {
+                "claude" => Source::Claude,
+                "codex" => Source::Codex,
+                "gemini" => Source::Gemini,
+                "pi" => Source::Pi,
+                "opencode" => Source::OpenCode,
+                "openrouter" => Source::OpenRouter,
+                _ => return Ok(None),
+            };
+            let dedup_key: String = row.get(1)?;
+            let month: String = row.get(2)?;
+            let Ok(month) = YearMonth::from_str(&month) else {
+                return Ok(None);
+            };
+            let model: String = row.get(3)?;
+            let provider: String = row.get(4)?;
+            let project: Option<String> = row.get(5)?;
+            let input: i64 = row.get(6)?;
+            let output: i64 = row.get(7)?;
+            let cache_read: i64 = row.get(8)?;
+            let cache_write: i64 = row.get(9)?;
+            let reasoning: i64 = row.get(10)?;
+            let known_cost_usd: Option<f64> = row.get(11)?;
+            let byok_usage_inference: Option<bool> = row.get(12)?;
+            let to_u64 = |v: i64| u64::try_from(v).unwrap_or(0);
+            Ok(Some(UsageEvent {
+                source,
+                month,
+                model: ModelSlug::new(model),
+                provider,
+                project,
+                tokens: TokenCounts {
+                    input: to_u64(input),
+                    output: to_u64(output),
+                    cache_read: to_u64(cache_read),
+                    cache_write: to_u64(cache_write),
+                    reasoning: to_u64(reasoning),
+                },
+                dedup_key,
+                known_cost_usd,
+                byok_usage_inference,
+            }))
+        })
+        .expect("query events rows");
+
+    let mut events = Vec::new();
+    for row in rows {
+        if let Some(event) = row.expect("read events row") {
+            events.push(event);
+        }
+    }
+    events
+}
+
 fn persist_source_files(
     conn: &mut Connection,
     source_files: &HashMap<(Source, String), SourceFileState>,
@@ -422,7 +488,22 @@ pub async fn run_readers_with_cache(
     let (tx, mut rx) = mpsc::channel(Sink::CAPACITY);
     let sink = Sink::new_cached(tx, cache_path);
 
-    run_readers_inner(cx, readers, sink, &mut rx).await
+    let fresh = run_readers_inner(cx, readers, sink, &mut rx).await;
+
+    // Replay persisted events from prior runs so totals don't decay to deltas.
+    // Fresh events from this scan win on dedup_key collision (they may carry
+    // corrected fields). The cache uses INSERT OR REPLACE keyed by
+    // (source, dedup_key), but we re-merge here so the returned Vec is
+    // consistent regardless of cache write ordering.
+    let persisted = load_events(&open_cache(cache_path));
+    let mut merged: HashMap<String, UsageEvent> = HashMap::with_capacity(persisted.len() + fresh.len());
+    for event in persisted {
+        merged.insert(event.dedup_key.clone(), event);
+    }
+    for event in fresh {
+        merged.insert(event.dedup_key.clone(), event);
+    }
+    merged.into_values().collect()
 }
 
 async fn run_readers_inner(
@@ -732,7 +813,9 @@ mod tests {
 
         assert_eq!(runtime.is_quiescent(), true);
         let (event_count, persisted_events, persisted_source_files) = event_count;
-        assert_eq!(event_count, 12);
+        // run_readers_with_cache merges fresh + persisted events by dedup_key,
+        // so all 12 sends collapse to 1 in the returned Vec.
+        assert_eq!(event_count, 1);
         assert_eq!(persisted_events, 1);
         assert_eq!(persisted_source_files, 0);
     }
@@ -871,6 +954,166 @@ mod tests {
 
         assert_eq!(count, 1);
         assert!((cost_after - 1.25).abs() < f64::EPSILON);
+    }
+
+    #[derive(Debug)]
+    struct NoOpReader;
+
+    #[async_trait]
+    impl Reader for NoOpReader {
+        fn source(&self) -> Source {
+            Source::Claude
+        }
+
+        async fn scan(&self, _cx: &Cx, _sink: &Sink) -> Outcome<(), ReaderError> {
+            Outcome::ok(())
+        }
+
+        fn cache_strategy(&self) -> CacheStrategy {
+            CacheStrategy::JsonlTail
+        }
+    }
+
+    #[test]
+    fn cached_run_replays_persisted_events_when_readers_emit_nothing() {
+        let cache_dir = TempDir::new().expect("temp cache dir");
+        let cache_path = cache_dir.path().join("index.sqlite");
+
+        // First pass: persist an event under dedup_key "kept-001" via a cached Sink.
+        let (_runtime, _) = run_on_lab(61, {
+            let cache_path = cache_path.clone();
+            move |cx| {
+                Box::pin(async move {
+                    let mut event = event(Source::Claude, 0);
+                    event.dedup_key = "kept-001".into();
+                    event.tokens.input = 12_345;
+                    event.known_cost_usd = Some(0.42);
+                    event.byok_usage_inference = Some(true);
+
+                    let (tx, mut rx) = mpsc::channel(Sink::CAPACITY);
+                    let sink = Sink::new_cached(tx, &cache_path);
+                    sink.send(&cx, event).await.expect("send");
+                    sink.close();
+                    while rx.recv(&cx).await.is_ok() {}
+                })
+            }
+        });
+
+        // Second pass: open a fresh cached Sink against the same path and run a
+        // reader that emits NO events. The returned Vec should still contain
+        // "kept-001" because cached events are replayed.
+        let (_runtime, events) = run_on_lab(62, {
+            let cache_path = cache_path.clone();
+            move |cx| {
+                Box::pin(async move {
+                    run_readers_with_cache(&cx, vec![Box::new(NoOpReader)], &cache_path).await
+                })
+            }
+        });
+
+        assert_eq!(events.len(), 1);
+        let kept = events
+            .iter()
+            .find(|e| e.dedup_key == "kept-001")
+            .expect("kept-001 replayed from cache");
+        assert_eq!(kept.source, Source::Claude);
+        assert_eq!(kept.tokens.input, 12_345);
+        assert_eq!(kept.known_cost_usd, Some(0.42));
+        assert_eq!(kept.byok_usage_inference, Some(true));
+        assert_eq!(kept.month, YearMonth::new(2026, 5));
+    }
+
+    #[test]
+    fn cached_run_merges_fresh_and_persisted_events_fresh_wins() {
+        let cache_dir = TempDir::new().expect("temp cache dir");
+        let cache_path = cache_dir.path().join("index.sqlite");
+
+        // Persist an event with known_cost_usd=0.5.
+        let (_runtime, _) = run_on_lab(71, {
+            let cache_path = cache_path.clone();
+            move |cx| {
+                Box::pin(async move {
+                    let mut event = event(Source::OpenRouter, 0);
+                    event.dedup_key = "or:ep-merge".into();
+                    event.known_cost_usd = Some(0.5);
+
+                    let (tx, mut rx) = mpsc::channel(Sink::CAPACITY);
+                    let sink = Sink::new_cached(tx, &cache_path);
+                    sink.send(&cx, event).await.expect("send");
+                    sink.close();
+                    while rx.recv(&cx).await.is_ok() {}
+                })
+            }
+        });
+
+        // Persist another event under a different dedup_key.
+        let (_runtime, _) = run_on_lab(72, {
+            let cache_path = cache_path.clone();
+            move |cx| {
+                Box::pin(async move {
+                    let mut event = event(Source::OpenRouter, 0);
+                    event.dedup_key = "or:ep-old".into();
+                    event.known_cost_usd = Some(0.1);
+
+                    let (tx, mut rx) = mpsc::channel(Sink::CAPACITY);
+                    let sink = Sink::new_cached(tx, &cache_path);
+                    sink.send(&cx, event).await.expect("send");
+                    sink.close();
+                    while rx.recv(&cx).await.is_ok() {}
+                })
+            }
+        });
+
+        // Run with a reader that re-emits "or:ep-merge" with an updated cost.
+        // Fresh should win; "or:ep-old" should be replayed unchanged.
+        #[derive(Debug)]
+        struct MergeReader;
+        #[async_trait]
+        impl Reader for MergeReader {
+            fn source(&self) -> Source {
+                Source::OpenRouter
+            }
+            async fn scan(&self, cx: &Cx, sink: &Sink) -> Outcome<(), ReaderError> {
+                let mut event = UsageEvent {
+                    source: Source::OpenRouter,
+                    month: YearMonth::new(2026, 5),
+                    model: ModelSlug::new("openrouter/test"),
+                    provider: "openrouter".into(),
+                    project: None,
+                    tokens: TokenCounts::default(),
+                    dedup_key: "or:ep-merge".into(),
+                    known_cost_usd: Some(1.25),
+                    byok_usage_inference: None,
+                };
+                event.dedup_key = "or:ep-merge".into();
+                let _ = sink.send(cx, event).await;
+                Outcome::ok(())
+            }
+            fn cache_strategy(&self) -> CacheStrategy {
+                CacheStrategy::NeverCache
+            }
+        }
+
+        let (_runtime, events) = run_on_lab(73, {
+            let cache_path = cache_path.clone();
+            move |cx| {
+                Box::pin(async move {
+                    run_readers_with_cache(&cx, vec![Box::new(MergeReader)], &cache_path).await
+                })
+            }
+        });
+
+        assert_eq!(events.len(), 2);
+        let merge = events
+            .iter()
+            .find(|e| e.dedup_key == "or:ep-merge")
+            .expect("merge key present");
+        assert_eq!(merge.known_cost_usd, Some(1.25), "fresh wins on collision");
+        let old = events
+            .iter()
+            .find(|e| e.dedup_key == "or:ep-old")
+            .expect("old key replayed");
+        assert_eq!(old.known_cost_usd, Some(0.1));
     }
 
     #[test]
