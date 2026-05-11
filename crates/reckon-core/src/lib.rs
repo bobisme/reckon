@@ -1,4 +1,7 @@
 pub mod model_map;
+pub mod pricing;
+
+pub use pricing::{Pricing, cost, load_pricing};
 
 use std::fmt;
 use std::ops::AddAssign;
@@ -261,14 +264,13 @@ mod proptest_roundtrip {
     }
 
     fn arb_token_counts() -> impl Strategy<Value = TokenCounts> {
-        (any::<u64>(), any::<u64>(), any::<u64>(), any::<u64>(), any::<u64>())
-            .prop_map(|(i, o, cr, cw, r)| TokenCounts {
-                input: i,
-                output: o,
-                cache_read: cr,
-                cache_write: cw,
-                reasoning: r,
-            })
+        (any::<u64>(), any::<u64>(), any::<u64>(), any::<u64>(), any::<u64>()).prop_map(|(i, o, cr, cw, r)| TokenCounts {
+            input: i,
+            output: o,
+            cache_read: cr,
+            cache_write: cw,
+            reasoning: r,
+        })
     }
 
     proptest! {
