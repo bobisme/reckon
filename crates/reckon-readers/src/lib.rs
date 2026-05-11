@@ -7,6 +7,8 @@ pub mod pi;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -15,7 +17,7 @@ use asupersync::{Cx, Outcome};
 use async_trait::async_trait;
 use futures::future;
 use futures::stream::{FuturesUnordered, StreamExt};
-use reckon_core::{open_cache, Source, UsageEvent};
+use reckon_core::{Source, UsageEvent, open_cache};
 use rusqlite::params;
 
 use rusqlite::Connection;
@@ -35,7 +37,9 @@ pub struct ReaderError {
 impl ReaderError {
     #[must_use]
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
+        Self {
+            message: message.into(),
+        }
     }
 }
 
@@ -78,7 +82,7 @@ pub trait Reader: Send + Sync {
 const EVENT_BATCH_SIZE: usize = 5_000;
 
 #[derive(Debug, Clone)]
-struct SourceFileState {
+pub(crate) struct SourceFileState {
     mtime_ns: i64,
     size_bytes: i64,
     last_offset: i64,
@@ -109,18 +113,22 @@ impl Sink {
 
     #[must_use]
     pub fn new(tx: mpsc::Sender<UsageEvent>) -> Self {
-        Self { inner: Arc::new(Mutex::new(Some(tx))), cache: None }
+        Self {
+            inner: Arc::new(Mutex::new(Some(tx))),
+            cache: None,
+        }
     }
 
     #[must_use]
     pub fn new_cached(tx: mpsc::Sender<UsageEvent>, cache_path: &Path) -> Self {
         let conn = open_cache(cache_path);
+        let source_files = load_source_files(&conn);
         Self {
             inner: Arc::new(Mutex::new(Some(tx))),
             cache: Some(Arc::new(Mutex::new(SinkCache {
                 conn,
                 events: Vec::new(),
-                source_files: HashMap::new(),
+                source_files,
             }))),
         }
     }
@@ -169,19 +177,32 @@ impl Sink {
     ) {
         if let Some(cache) = self.cache.as_ref() {
             let mut state = cache.lock().expect("sink cache mutex poisoned");
-            state
-                .source_files
-                .insert((source, path.to_string_lossy().to_string()), SourceFileState {
+            state.source_files.insert(
+                (source, path.to_string_lossy().to_string()),
+                SourceFileState {
                     mtime_ns,
                     size_bytes,
                     last_offset,
-                });
+                },
+            );
         }
     }
 
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
+    pub(crate) fn source_file_state(&self, source: Source, path: &Path) -> Option<SourceFileState> {
+        let cache = self.cache.as_ref()?;
+        let state = cache.lock().expect("sink cache mutex poisoned");
+        state
+            .source_files
+            .get(&(source, path.to_string_lossy().to_string()))
+            .cloned()
+    }
+
+    /// # Panics
+    ///
+    /// Panics if the internal mutexes are poisoned.
     pub fn close(&self) {
         let _ = self.inner.lock().expect("sink mutex poisoned").take();
 
@@ -195,13 +216,96 @@ impl Sink {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonlScanPlan {
+    Skip {
+        mtime_ns: i64,
+        size_bytes: i64,
+    },
+    ReadFrom {
+        start_offset: i64,
+        mtime_ns: i64,
+        size_bytes: i64,
+    },
+}
+
+pub(crate) fn plan_jsonl_scan(
+    sink: &Sink,
+    source: Source,
+    path: &Path,
+    mtime_ns: i64,
+    size_bytes: i64,
+) -> JsonlScanPlan {
+    let Some(previous) = sink.source_file_state(source, path) else {
+        return JsonlScanPlan::ReadFrom {
+            start_offset: 0,
+            mtime_ns,
+            size_bytes,
+        };
+    };
+
+    if previous.mtime_ns == mtime_ns && previous.size_bytes == size_bytes {
+        return JsonlScanPlan::Skip {
+            mtime_ns,
+            size_bytes,
+        };
+    }
+
+    if size_bytes > previous.size_bytes && mtime_ns >= previous.mtime_ns {
+        return JsonlScanPlan::ReadFrom {
+            start_offset: previous.last_offset.min(size_bytes),
+            mtime_ns,
+            size_bytes,
+        };
+    }
+
+    JsonlScanPlan::ReadFrom {
+        start_offset: 0,
+        mtime_ns,
+        size_bytes,
+    }
+}
+
+pub(crate) fn read_jsonl_prefix(path: &Path, end_offset: i64) -> io::Result<String> {
+    #[cfg(test)]
+    JSONL_OPEN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    let file = File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(
+        u64::try_from(end_offset)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "negative JSONL offset"))?,
+    )
+    .read_to_end(&mut bytes)?;
+    String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+}
+
+pub(crate) fn read_jsonl_from_offset(path: &Path, start_offset: i64) -> io::Result<String> {
+    #[cfg(test)]
+    JSONL_OPEN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    if start_offset == 0 {
+        return std::fs::read_to_string(path);
+    }
+
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(u64::try_from(start_offset).map_err(
+        |_| io::Error::new(io::ErrorKind::InvalidData, "negative JSONL offset"),
+    )?))?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents)?;
+    Ok(contents)
+}
+
 fn persist_events(conn: &mut Connection, events: &mut Vec<UsageEvent>) {
     let stmt = "INSERT OR IGNORE INTO events \
         (source, dedup_key, month, model, provider, project, input, output, cache_read, cache_write, reasoning, known_cost_usd, byok_usage_inference) \
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
 
     for chunk in events.chunks(EVENT_BATCH_SIZE) {
-        let tx = conn.transaction().expect("failed to begin cache events transaction");
+        let tx = conn
+            .transaction()
+            .expect("failed to begin cache events transaction");
         for event in chunk {
             tx.execute(
                 stmt,
@@ -223,10 +327,51 @@ fn persist_events(conn: &mut Connection, events: &mut Vec<UsageEvent>) {
             )
             .expect("failed to persist usage event");
         }
-        tx.commit().expect("failed to commit cache events transaction");
+        tx.commit()
+            .expect("failed to commit cache events transaction");
     }
 
     events.clear();
+}
+
+fn load_source_files(conn: &Connection) -> HashMap<(Source, String), SourceFileState> {
+    let mut stmt = conn
+        .prepare("SELECT source, path, mtime_ns, size_bytes, last_offset FROM source_files")
+        .expect("prepare source-files query");
+    let rows = stmt
+        .query_map([], |row| {
+            let source: String = row.get(0)?;
+            let source = match source.as_str() {
+                "claude" => Source::Claude,
+                "codex" => Source::Codex,
+                "gemini" => Source::Gemini,
+                "pi" => Source::Pi,
+                "opencode" => Source::OpenCode,
+                "openrouter" => Source::OpenRouter,
+                _ => return Ok(None),
+            };
+            let path: String = row.get(1)?;
+            let mtime_ns: i64 = row.get(2)?;
+            let size_bytes: i64 = row.get(3)?;
+            let last_offset: i64 = row.get(4)?;
+            Ok(Some((
+                (source, path),
+                SourceFileState {
+                    mtime_ns,
+                    size_bytes,
+                    last_offset,
+                },
+            )))
+        })
+        .expect("query source-files rows");
+
+    let mut source_files = HashMap::new();
+    for row in rows {
+        if let Some((key, state)) = row.expect("read source-files row") {
+            source_files.insert(key, state);
+        }
+    }
+    source_files
 }
 
 fn persist_source_files(
@@ -237,7 +382,9 @@ fn persist_source_files(
         return;
     }
 
-    let tx = conn.transaction().expect("failed to begin cache source-files transaction");
+    let tx = conn
+        .transaction()
+        .expect("failed to begin cache source-files transaction");
     for ((source, path), state) in source_files {
         tx.execute(
             "INSERT INTO source_files (source, path, mtime_ns, size_bytes, last_offset)
@@ -256,7 +403,8 @@ fn persist_source_files(
         )
         .expect("failed to persist source file state");
     }
-    tx.commit().expect("failed to commit cache source-files transaction");
+    tx.commit()
+        .expect("failed to commit cache source-files transaction");
 }
 
 pub async fn run_readers(cx: &Cx, readers: Vec<Box<dyn Reader>>) -> Vec<UsageEvent> {
@@ -312,13 +460,26 @@ async fn run_readers_inner(
 }
 
 #[cfg(test)]
+static JSONL_OPEN_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn reset_jsonl_open_count() {
+    JSONL_OPEN_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+pub(crate) fn jsonl_open_count() -> usize {
+    JSONL_OPEN_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
     use asupersync::lab::{LabConfig, LabRuntime};
     use asupersync::{Budget, CancelReason, Cx};
-    use reckon_core::{open_cache, ModelSlug, TokenCounts, YearMonth};
+    use reckon_core::{ModelSlug, TokenCounts, YearMonth, open_cache};
     use tempfile::TempDir;
 
     #[derive(Debug)]
@@ -330,11 +491,19 @@ mod tests {
 
     impl MockReader {
         fn new(source: Source, count: usize) -> Self {
-            Self { source, count, cancel_after_first_send: false }
+            Self {
+                source,
+                count,
+                cancel_after_first_send: false,
+            }
         }
 
         fn cancelling(source: Source, count: usize) -> Self {
-            Self { source, count, cancel_after_first_send: true }
+            Self {
+                source,
+                count,
+                cancel_after_first_send: true,
+            }
         }
     }
 
@@ -347,7 +516,11 @@ mod tests {
 
     impl DuplicateKeyReader {
         fn new(source: Source, count: usize, dedup_key: &str) -> Self {
-            Self { source, count, dedup_key: dedup_key.to_string() }
+            Self {
+                source,
+                count,
+                dedup_key: dedup_key.to_string(),
+            }
         }
     }
 
@@ -443,9 +616,16 @@ mod tests {
                 *slot_clone.lock().expect("slot mutex poisoned") = Some(value);
             })
             .expect("create task");
-        runtime.scheduler.lock().schedule(task_id, Budget::INFINITE.priority);
+        runtime
+            .scheduler
+            .lock()
+            .schedule(task_id, Budget::INFINITE.priority);
         runtime.run_until_quiescent();
-        let value = slot.lock().expect("slot mutex poisoned").take().expect("task result");
+        let value = slot
+            .lock()
+            .expect("slot mutex poisoned")
+            .take()
+            .expect("task result");
         (runtime, value)
     }
 
@@ -498,8 +678,20 @@ mod tests {
 
         events.sort_by(|a, b| a.dedup_key.cmp(&b.dedup_key));
         assert_eq!(events.len(), 3_000);
-        assert_eq!(events.iter().filter(|event| event.source == Source::Claude).count(), 1_500);
-        assert_eq!(events.iter().filter(|event| event.source == Source::Codex).count(), 1_500);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.source == Source::Claude)
+                .count(),
+            1_500
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.source == Source::Codex)
+                .count(),
+            1_500
+        );
     }
 
     #[test]
@@ -512,17 +704,25 @@ mod tests {
                 Box::pin(async move {
                     let events = run_readers_with_cache(
                         &cx,
-                        vec![Box::new(DuplicateKeyReader::new(Source::Claude, 12, "dup-key"))],
+                        vec![Box::new(DuplicateKeyReader::new(
+                            Source::Claude,
+                            12,
+                            "dup-key",
+                        ))],
                         &cache_path,
                     )
                     .await;
 
                     let conn = open_cache(&cache_path);
                     let persisted_events: i64 = conn
-                        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_, i64>(0))
+                        .query_row("SELECT COUNT(*) FROM events", [], |row| {
+                            row.get::<_, i64>(0)
+                        })
                         .expect("query events count");
                     let persisted_files: i64 = conn
-                        .query_row("SELECT COUNT(*) FROM source_files", [], |row| row.get::<_, i64>(0))
+                        .query_row("SELECT COUNT(*) FROM source_files", [], |row| {
+                            row.get::<_, i64>(0)
+                        })
                         .expect("query source files count");
 
                     (events.len(), persisted_events, persisted_files)
@@ -555,7 +755,9 @@ mod tests {
 
                     let conn = open_cache(&cache_path);
                     let rows: i64 = conn
-                        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_, i64>(0))
+                        .query_row("SELECT COUNT(*) FROM events", [], |row| {
+                            row.get::<_, i64>(0)
+                        })
                         .expect("query events count");
 
                     (events.len(), rows)
@@ -566,7 +768,10 @@ mod tests {
 
         assert_eq!(event_count, 1000);
         assert_eq!(db_rows, 1000);
-        assert!(elapsed.as_millis() < 200, "cold scan took {elapsed:?}, expected < 200ms");
+        assert!(
+            elapsed.as_millis() < 200,
+            "cold scan took {elapsed:?}, expected < 200ms"
+        );
     }
 
     #[test]
@@ -586,7 +791,9 @@ mod tests {
 
                     let conn = open_cache(&cache_path);
                     let rows: i64 = conn
-                        .query_row("SELECT COUNT(*) FROM events", [], |row| row.get::<_, i64>(0))
+                        .query_row("SELECT COUNT(*) FROM events", [], |row| {
+                            row.get::<_, i64>(0)
+                        })
                         .expect("query events count");
                     rows
                 })

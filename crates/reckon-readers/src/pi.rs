@@ -6,14 +6,17 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use async_trait::async_trait;
 use asupersync::{Cx, Outcome};
+use async_trait::async_trait;
 use reckon_core::model_map;
 use reckon_core::{Source, TokenCounts, UsageEvent, YearMonth};
 use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 
-use crate::{CacheStrategy, Reader, ReaderError, Sink, SinkError};
+use crate::{
+    CacheStrategy, JsonlScanPlan, Reader, ReaderError, Sink, SinkError, plan_jsonl_scan,
+    read_jsonl_from_offset,
+};
 
 /// Tuple describing one Pi session file to parse.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,12 +106,16 @@ impl Default for PiReader {
 impl PiReader {
     #[must_use]
     pub fn new() -> Self {
-        Self { locator: PiSessionLocator::new() }
+        Self {
+            locator: PiSessionLocator::new(),
+        }
     }
 
     #[must_use]
     pub const fn with_root(root: PathBuf) -> Self {
-        Self { locator: PiSessionLocator::with_root(root) }
+        Self {
+            locator: PiSessionLocator::with_root(root),
+        }
     }
 }
 
@@ -122,9 +129,7 @@ impl Reader for PiReader {
         let tuples = match self.locator.list_session_tuples() {
             Ok(t) => t,
             Err(e) => {
-                return Outcome::Err(ReaderError::new(format!(
-                    "listing Pi sessions: {e}"
-                )));
+                return Outcome::Err(ReaderError::new(format!("listing Pi sessions: {e}")));
             }
         };
 
@@ -164,7 +169,9 @@ fn should_use_sqlite_index(path: &Path, walk_entries: &[PathBuf]) -> bool {
         return false;
     }
 
-    let Ok(db_mtime) = file_modified_secs(path) else { return false };
+    let Ok(db_mtime) = file_modified_secs(path) else {
+        return false;
+    };
 
     if walk_entries.is_empty() {
         return true;
@@ -172,7 +179,9 @@ fn should_use_sqlite_index(path: &Path, walk_entries: &[PathBuf]) -> bool {
 
     let mut latest_jsonl = None;
     for entry in walk_entries {
-        let Ok(modified) = file_modified_secs(entry) else { return false };
+        let Ok(modified) = file_modified_secs(entry) else {
+            return false;
+        };
 
         latest_jsonl = Some(match latest_jsonl {
             Some(prev) if prev > modified => prev,
@@ -344,12 +353,67 @@ struct PiUsage {
     cost: Option<f64>,
 }
 
+fn indexed_mtime_ns(tuple: &PiSessionTuple) -> Option<i64> {
+    tuple
+        .last_modified
+        .checked_mul(1_000_000_000)
+        .filter(|mtime_ns| *mtime_ns > 0)
+}
+
+fn plan_pi_scan(tuple: &PiSessionTuple, sink: &Sink) -> Result<Option<(i64, i64, i64)>, ScanError> {
+    let indexed_mtime_ns = indexed_mtime_ns(tuple);
+    if let (Some(indexed_mtime_ns), Some(previous)) = (
+        indexed_mtime_ns,
+        sink.source_file_state(Source::Pi, &tuple.session_path),
+    ) && previous.mtime_ns == indexed_mtime_ns
+        && previous.last_offset == previous.size_bytes
+    {
+        return Ok(None);
+    }
+
+    let metadata = fs::metadata(&tuple.session_path).map_err(ScanError::Io)?;
+    let actual_mtime_ns = file_modified_secs(&tuple.session_path)
+        .map_err(ScanError::Io)?
+        .checked_mul(1_000_000_000)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "mtime too large for i64"))
+        .map_err(ScanError::Io)?;
+    let recorded_mtime_ns = indexed_mtime_ns.unwrap_or(actual_mtime_ns);
+    let size_bytes = i64::try_from(metadata.len()).expect("file size too large");
+
+    match plan_jsonl_scan(
+        sink,
+        Source::Pi,
+        &tuple.session_path,
+        recorded_mtime_ns,
+        size_bytes,
+    ) {
+        JsonlScanPlan::Skip { .. } => {
+            sink.record_source_file(
+                Source::Pi,
+                &tuple.session_path,
+                recorded_mtime_ns,
+                size_bytes,
+                size_bytes,
+            );
+            Ok(None)
+        }
+        JsonlScanPlan::ReadFrom { start_offset, .. } => {
+            Ok(Some((start_offset, recorded_mtime_ns, size_bytes)))
+        }
+    }
+}
+
 async fn scan_pi_session_file(
     tuple: &PiSessionTuple,
     cx: &Cx,
     sink: &Sink,
 ) -> Result<(), ScanError> {
-    let contents = fs::read_to_string(&tuple.session_path).map_err(ScanError::Io)?;
+    let Some((start_offset, recorded_mtime_ns, size_bytes)) = plan_pi_scan(tuple, sink)? else {
+        return Ok(());
+    };
+
+    let contents =
+        read_jsonl_from_offset(&tuple.session_path, start_offset).map_err(ScanError::Io)?;
 
     for line in contents.lines() {
         if line.is_empty() {
@@ -365,7 +429,9 @@ async fn scan_pi_session_file(
             continue;
         }
 
-        let Some(message) = entry.message else { continue };
+        let Some(message) = entry.message else {
+            continue;
+        };
 
         let Some(role) = message.role else { continue };
         if role != "assistant" {
@@ -373,9 +439,15 @@ async fn scan_pi_session_file(
         }
 
         let Some(usage) = message.usage else { continue };
-        let Some(message_id) = message.id else { continue };
-        let Some(timestamp_ms) = message.timestamp else { continue };
-        let Some(provider) = message.provider else { continue };
+        let Some(message_id) = message.id else {
+            continue;
+        };
+        let Some(timestamp_ms) = message.timestamp else {
+            continue;
+        };
+        let Some(provider) = message.provider else {
+            continue;
+        };
         let Some(model) = message.model else { continue };
 
         let timestamp_secs = timestamp_ms / 1000;
@@ -403,6 +475,14 @@ async fn scan_pi_session_file(
         sink.send(cx, event).await.map_err(ScanError::Sink)?;
     }
 
+    sink.record_source_file(
+        Source::Pi,
+        &tuple.session_path,
+        recorded_mtime_ns,
+        size_bytes,
+        size_bytes,
+    );
+
     Ok(())
 }
 
@@ -413,9 +493,9 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::{Arc, Mutex};
 
-    use asupersync::lab::{LabConfig, LabRuntime};
+    use crate::{reset_jsonl_open_count, run_readers, run_readers_with_cache};
     use asupersync::Budget;
-    use crate::run_readers;
+    use asupersync::lab::{LabConfig, LabRuntime};
 
     fn set_mtime(path: &Path, secs: i64) {
         let time = FileTime::from_unix_time(secs, 0);
@@ -487,9 +567,15 @@ mod tests {
                 *slot_clone.lock().expect("slot mutex poisoned") = Some(value);
             })
             .expect("create task");
-        runtime.scheduler.lock().schedule(task_id, Budget::INFINITE.priority);
+        runtime
+            .scheduler
+            .lock()
+            .schedule(task_id, Budget::INFINITE.priority);
         runtime.run_until_quiescent();
-        slot.lock().expect("slot mutex poisoned").take().expect("task result")
+        slot.lock()
+            .expect("slot mutex poisoned")
+            .take()
+            .expect("task result")
     }
 
     fn fixture_path(rel: &str) -> PathBuf {
@@ -646,10 +732,11 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let pi_root = tmp.path().join(".pi");
         let sessions_dir = pi_root.join("agent").join("sessions");
-        let session_path = sessions_dir.join("--home-bob-src-project").join("sample.jsonl");
+        let session_path = sessions_dir
+            .join("--home-bob-src-project")
+            .join("sample.jsonl");
         fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
-        fs::copy(fixture_dir.join("sample.jsonl"), &session_path)
-            .expect("copy fixture");
+        fs::copy(fixture_dir.join("sample.jsonl"), &session_path).expect("copy fixture");
         set_mtime(&session_path, 100);
 
         let db_path = sessions_dir.join("session-index.sqlite");
@@ -668,14 +755,20 @@ mod tests {
         let reader = PiReader::with_root(pi_root);
 
         let events: Vec<UsageEvent> = run_on_lab(42, move |cx| {
-            Box::pin(async move {
-                run_readers(&cx, vec![Box::new(reader)]).await
-            })
+            Box::pin(async move { run_readers(&cx, vec![Box::new(reader)]).await })
         });
 
-        assert_eq!(events.len(), 3, "expected 3 events, got {}: {events:?}", events.len());
+        assert_eq!(
+            events.len(),
+            3,
+            "expected 3 events, got {}: {events:?}",
+            events.len()
+        );
 
-        let e0 = events.iter().find(|e| e.dedup_key == "session-001:msg_002").expect("msg_002");
+        let e0 = events
+            .iter()
+            .find(|e| e.dedup_key == "session-001:msg_002")
+            .expect("msg_002");
         assert_eq!(e0.model.as_str(), "anthropic/claude-haiku-4.5");
         assert_eq!(e0.tokens.input, 150);
         assert_eq!(e0.tokens.output, 45);
@@ -686,13 +779,19 @@ mod tests {
         assert_eq!(e0.month, YearMonth::new(2026, 5));
         assert_eq!(e0.project, Some("home/bob/src/project".into()));
 
-        let e1 = events.iter().find(|e| e.dedup_key == "session-001:msg_004").expect("msg_004");
+        let e1 = events
+            .iter()
+            .find(|e| e.dedup_key == "session-001:msg_004")
+            .expect("msg_004");
         assert_eq!(e1.tokens.input, 200);
         assert_eq!(e1.tokens.output, 20);
         assert_eq!(e1.tokens.cache_read, 100);
         assert_eq!(e1.tokens.cache_write, 50);
 
-        let e2 = events.iter().find(|e| e.dedup_key == "session-001:msg_006").expect("msg_006");
+        let e2 = events
+            .iter()
+            .find(|e| e.dedup_key == "session-001:msg_006")
+            .expect("msg_006");
         assert_eq!(e2.provider, "google");
         assert_eq!(e2.model.as_str(), "google/gemini-2-pro");
     }
@@ -703,10 +802,11 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let pi_root = tmp.path().join(".pi");
         let sessions_dir = pi_root.join("agent").join("sessions");
-        let session_path = sessions_dir.join("--home-bob-src-project").join("sample.jsonl");
+        let session_path = sessions_dir
+            .join("--home-bob-src-project")
+            .join("sample.jsonl");
         fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
-        fs::copy(fixture_dir.join("sample.jsonl"), &session_path)
-            .expect("copy fixture");
+        fs::copy(fixture_dir.join("sample.jsonl"), &session_path).expect("copy fixture");
         set_mtime(&session_path, 100);
 
         let db_path = sessions_dir.join("session-index.sqlite");
@@ -725,14 +825,21 @@ mod tests {
         let reader = PiReader::with_root(pi_root);
 
         let events: Vec<UsageEvent> = run_on_lab(42, move |cx| {
-            Box::pin(async move {
-                run_readers(&cx, vec![Box::new(reader)]).await
-            })
+            Box::pin(async move { run_readers(&cx, vec![Box::new(reader)]).await })
         });
 
         for event in events {
             assert!(!event.dedup_key.contains("cost"));
-            assert_eq!(event.tokens.input + event.tokens.output + event.tokens.cache_read + event.tokens.cache_write, 0u64 + event.tokens.input + event.tokens.output + event.tokens.cache_read + event.tokens.cache_write);
+            assert_eq!(
+                event.tokens.input
+                    + event.tokens.output
+                    + event.tokens.cache_read
+                    + event.tokens.cache_write,
+                0u64 + event.tokens.input
+                    + event.tokens.output
+                    + event.tokens.cache_read
+                    + event.tokens.cache_write
+            );
         }
     }
 
@@ -741,7 +848,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let pi_root = tmp.path().join(".pi");
         let sessions_dir = pi_root.join("agent").join("sessions");
-        let session_path = sessions_dir.join("--home-bob-src-empty").join("empty.jsonl");
+        let session_path = sessions_dir
+            .join("--home-bob-src-empty")
+            .join("empty.jsonl");
         fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
         fs::write(
             &session_path,
@@ -765,12 +874,69 @@ mod tests {
         let reader = PiReader::with_root(pi_root);
 
         let events: Vec<UsageEvent> = run_on_lab(99, move |cx| {
-            Box::pin(async move {
-                run_readers(&cx, vec![Box::new(reader)]).await
-            })
+            Box::pin(async move { run_readers(&cx, vec![Box::new(reader)]).await })
         });
 
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn cached_scan_can_short_circuit_pi_index_without_statting_jsonl() {
+        let fixture_dir = fixture_path("pi");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pi_root = tmp.path().join(".pi");
+        let sessions_dir = pi_root.join("agent").join("sessions");
+        let session_path = sessions_dir
+            .join("--home-bob-src-project")
+            .join("sample.jsonl");
+        fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
+        fs::copy(fixture_dir.join("sample.jsonl"), &session_path).expect("copy fixture");
+
+        let db_path = sessions_dir.join("session-index.sqlite");
+        create_session_db(
+            &db_path,
+            [(
+                "--home-bob-src-project/sample.jsonl",
+                "session-001",
+                "home/bob/src/project",
+                1000,
+                1000,
+            )],
+        );
+        set_mtime(&db_path, 2000);
+
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        let cache_path = cache_dir.path().join("index.sqlite");
+
+        let first_count = run_on_lab(43, {
+            let cache_path = cache_path.clone();
+            let root = pi_root.clone();
+            move |cx| {
+                Box::pin(async move {
+                    let reader = PiReader::with_root(root);
+                    run_readers_with_cache(&cx, vec![Box::new(reader)], &cache_path)
+                        .await
+                        .len()
+                })
+            }
+        });
+        assert_eq!(first_count, 3);
+
+        fs::remove_file(&session_path).expect("remove session file after caching");
+        reset_jsonl_open_count();
+        let second_count = run_on_lab(44, {
+            let cache_path = cache_path.clone();
+            let root = pi_root.clone();
+            move |cx| {
+                Box::pin(async move {
+                    let reader = PiReader::with_root(root);
+                    run_readers_with_cache(&cx, vec![Box::new(reader)], &cache_path)
+                        .await
+                        .len()
+                })
+            }
+        });
+        assert_eq!(second_count, 0);
     }
 
     #[test]
@@ -779,9 +945,7 @@ mod tests {
         let reader = PiReader::with_root(tmp.path().join("no-pi"));
 
         let events: Vec<UsageEvent> = run_on_lab(1, move |cx| {
-            Box::pin(async move {
-                run_readers(&cx, vec![Box::new(reader)]).await
-            })
+            Box::pin(async move { run_readers(&cx, vec![Box::new(reader)]).await })
         });
 
         assert!(events.is_empty());

@@ -11,7 +11,10 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::{CacheStrategy, Reader, ReaderError, Sink, SinkError};
+use crate::{
+    CacheStrategy, JsonlScanPlan, Reader, ReaderError, Sink, SinkError, plan_jsonl_scan,
+    read_jsonl_from_offset, read_jsonl_prefix,
+};
 
 /// Represents a Codex session file with its path, session UUID, and date.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -304,9 +307,39 @@ enum ScanError {
 }
 
 async fn scan_rollout_file(path: &Path, cx: &Cx, sink: &Sink) -> Result<(), ScanError> {
-    let contents = fs::read_to_string(path).map_err(ScanError::Io)?;
-    let mut state = CodexSessionState::default();
+    let metadata = fs::metadata(path).map_err(ScanError::Io)?;
+    let mtime_ns =
+        file_modified_nanos(metadata.modified().map_err(ScanError::Io)?).map_err(ScanError::Io)?;
+    let size_bytes = i64::try_from(metadata.len()).expect("file size too large");
 
+    let start_offset = match plan_jsonl_scan(sink, Source::Codex, path, mtime_ns, size_bytes) {
+        JsonlScanPlan::Skip { .. } => {
+            sink.record_source_file(Source::Codex, path, mtime_ns, size_bytes, size_bytes);
+            return Ok(());
+        }
+        JsonlScanPlan::ReadFrom { start_offset, .. } => start_offset,
+    };
+
+    let mut state = CodexSessionState::default();
+    if start_offset > 0 {
+        let prefix = read_jsonl_prefix(path, start_offset).map_err(ScanError::Io)?;
+        apply_rollout_contents(&prefix, &mut state, None, cx).await?;
+    }
+
+    let contents = read_jsonl_from_offset(path, start_offset).map_err(ScanError::Io)?;
+    apply_rollout_contents(&contents, &mut state, Some(sink), cx).await?;
+
+    sink.record_source_file(Source::Codex, path, mtime_ns, size_bytes, size_bytes);
+
+    Ok(())
+}
+
+async fn apply_rollout_contents(
+    contents: &str,
+    state: &mut CodexSessionState,
+    emit_to: Option<&Sink>,
+    cx: &Cx,
+) -> Result<(), ScanError> {
     for line in contents.lines() {
         if line.is_empty() {
             continue;
@@ -319,13 +352,15 @@ async fn scan_rollout_file(path: &Path, cx: &Cx, sink: &Sink) -> Result<(), Scan
 
         match entry.entry_type.as_str() {
             "session_meta" => {
-                let Ok(payload) = serde_json::from_value::<SessionMetaPayload>(entry.payload) else {
+                let Ok(payload) = serde_json::from_value::<SessionMetaPayload>(entry.payload)
+                else {
                     continue;
                 };
                 state.on_session_meta(payload);
             }
             "turn_context" => {
-                let Ok(payload) = serde_json::from_value::<TurnContextPayload>(entry.payload) else {
+                let Ok(payload) = serde_json::from_value::<TurnContextPayload>(entry.payload)
+                else {
                     continue;
                 };
                 state.on_turn_context(payload);
@@ -340,12 +375,16 @@ async fn scan_rollout_file(path: &Path, cx: &Cx, sink: &Sink) -> Result<(), Scan
                 let Some(current) = token_counts_from_info(payload.info) else {
                     continue;
                 };
-                let Some(timestamp) = entry.timestamp.as_deref() else { continue };
+                let Some(timestamp) = entry.timestamp.as_deref() else {
+                    continue;
+                };
                 let Some(timestamp_secs) = parse_iso8601_to_epoch(timestamp) else {
                     continue;
                 };
-                if let Some(event) = state.on_token_count(timestamp_secs, current) {
-                    sink.send(cx, event).await.map_err(ScanError::Sink)?;
+                if let Some(event) = state.on_token_count(timestamp_secs, current)
+                    && let Some(emit_to) = emit_to
+                {
+                    emit_to.send(cx, event).await.map_err(ScanError::Sink)?;
                 }
             }
             "token_count" => {
@@ -355,22 +394,21 @@ async fn scan_rollout_file(path: &Path, cx: &Cx, sink: &Sink) -> Result<(), Scan
                 let Some(current) = token_counts_from_info(payload.info) else {
                     continue;
                 };
-                let Some(timestamp) = entry.timestamp.as_deref() else { continue };
+                let Some(timestamp) = entry.timestamp.as_deref() else {
+                    continue;
+                };
                 let Some(timestamp_secs) = parse_iso8601_to_epoch(timestamp) else {
                     continue;
                 };
-                if let Some(event) = state.on_token_count(timestamp_secs, current) {
-                    sink.send(cx, event).await.map_err(ScanError::Sink)?;
+                if let Some(event) = state.on_token_count(timestamp_secs, current)
+                    && let Some(emit_to) = emit_to
+                {
+                    emit_to.send(cx, event).await.map_err(ScanError::Sink)?;
                 }
             }
             _ => {}
         }
     }
-
-    let metadata = fs::metadata(path).map_err(ScanError::Io)?;
-    let mtime_ns = file_modified_nanos(metadata.modified().map_err(ScanError::Io)?).map_err(ScanError::Io)?;
-    let size_bytes = i64::try_from(metadata.len()).expect("file size too large");
-    sink.record_source_file(Source::Codex, path, mtime_ns, size_bytes, size_bytes);
 
     Ok(())
 }
@@ -404,7 +442,11 @@ fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
 
 #[expect(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
 fn civil_to_epoch(y: i32, m: u32, d: u32, h: u32, min: u32, sec: u32) -> i64 {
-    let (y, m) = if m <= 2 { (i64::from(y) - 1, m + 9) } else { (i64::from(y), m - 3) };
+    let (y, m) = if m <= 2 {
+        (i64::from(y) - 1, m + 9)
+    } else {
+        (i64::from(y), m - 3)
+    };
     let era = (if y >= 0 { y } else { y - 399 }) / 400;
     let yoe = (y - era * 400) as u64;
     let doy = (153 * u64::from(m) + 2) / 5 + u64::from(d) - 1;
@@ -461,8 +503,8 @@ impl Reader for CodexReader {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use asupersync::lab::{LabConfig, LabRuntime};
     use asupersync::Budget;
+    use asupersync::lab::{LabConfig, LabRuntime};
     use proptest::prelude::*;
 
     use super::*;
@@ -485,9 +527,15 @@ mod tests {
                 *slot_clone.lock().expect("slot mutex poisoned") = Some(value);
             })
             .expect("create task");
-        runtime.scheduler.lock().schedule(task_id, Budget::INFINITE.priority);
+        runtime
+            .scheduler
+            .lock()
+            .schedule(task_id, Budget::INFINITE.priority);
         runtime.run_until_quiescent();
-        slot.lock().expect("slot mutex poisoned").take().expect("task result")
+        slot.lock()
+            .expect("slot mutex poisoned")
+            .take()
+            .expect("task result")
     }
 
     #[test]
@@ -609,9 +657,18 @@ mod tests {
 
         // Create files in reverse order to verify sorting
         let files = vec![
-            ("2026/05/15/rollout-2026-05-15T10-00-00-c.jsonl", (2026, 5, 15)),
-            ("2026/05/10/rollout-2026-05-10T10-00-00-a.jsonl", (2026, 5, 10)),
-            ("2026/05/12/rollout-2026-05-12T10-00-00-b.jsonl", (2026, 5, 12)),
+            (
+                "2026/05/15/rollout-2026-05-15T10-00-00-c.jsonl",
+                (2026, 5, 15),
+            ),
+            (
+                "2026/05/10/rollout-2026-05-10T10-00-00-a.jsonl",
+                (2026, 5, 10),
+            ),
+            (
+                "2026/05/12/rollout-2026-05-12T10-00-00-b.jsonl",
+                (2026, 5, 12),
+            ),
         ];
 
         for (path, _) in &files {
