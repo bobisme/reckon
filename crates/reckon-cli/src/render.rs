@@ -22,13 +22,12 @@ fn colorize(text: &str, ansi_code: &str, enabled: bool) -> String {
     }
 }
 
-pub fn print_table(
+pub fn format_table(
     aggregated: &BTreeMap<AggregateKey, TokenCounts>,
     pricing: &HashMap<ModelSlug, Pricing>,
     balance: Option<&OpenRouterSummary>,
-    use_color: bool,
     by: &BySpec,
-) {
+) -> String {
     let totals = month_totals(aggregated);
     let months: Vec<YearMonth> = totals.keys().copied().collect();
 
@@ -88,8 +87,23 @@ pub fn print_table(
         table.modify(Columns::single(col), Alignment::right());
     }
 
-    println!("{}", colorize(&table.to_string(), ANSI_BLUE, use_color));
+    let mut out = table.to_string();
+    if let Some(summary) = balance {
+        out.push('\n');
+        out.push_str(&fmt_balance(summary));
+    }
+    out
+}
 
+pub fn print_table(
+    aggregated: &BTreeMap<AggregateKey, TokenCounts>,
+    pricing: &HashMap<ModelSlug, Pricing>,
+    balance: Option<&OpenRouterSummary>,
+    use_color: bool,
+    by: &BySpec,
+) {
+    let table_str = format_table(aggregated, pricing, None, by);
+    println!("{}", colorize(&table_str, ANSI_BLUE, use_color));
     if let Some(summary) = balance {
         println!(
             "{}",
@@ -274,12 +288,12 @@ fn build_json_data_row(
     Value::Object(obj)
 }
 
-pub fn print_json(
+pub fn format_json(
     events: &[UsageEvent],
     pricing: &HashMap<ModelSlug, Pricing>,
     balance: Option<&OpenRouterSummary>,
     by: &BySpec,
-) {
+) -> String {
     let (aggregated, totals) = aggregate_for_json(events, by);
     let months: Vec<YearMonth> = totals.keys().copied().collect();
     let mut rows: Vec<Value> = Vec::new();
@@ -322,15 +336,22 @@ pub fn print_json(
         rows.push(serde_json::json!({"openrouter_balance": summary}));
     }
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&rows).expect("json serialization")
-    );
+    serde_json::to_string_pretty(&rows).expect("json serialization")
+}
+
+pub fn print_json(
+    events: &[UsageEvent],
+    pricing: &HashMap<ModelSlug, Pricing>,
+    balance: Option<&OpenRouterSummary>,
+    by: &BySpec,
+) {
+    println!("{}", format_json(events, pricing, balance, by));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::report::aggregate;
 
     #[test]
     fn fmt_thousands_cases() {
@@ -358,5 +379,180 @@ mod tests {
             fmt_balance(&summary),
             "OpenRouter balance: $74.50 (used $25.50 of $100.00 purchased)"
         );
+    }
+
+    fn fixture_events() -> Vec<UsageEvent> {
+        vec![
+            UsageEvent {
+                source: Source::Claude,
+                month: YearMonth::new(2026, 4),
+                model: ModelSlug::new("anthropic/claude-opus-4.7"),
+                provider: "anthropic".into(),
+                project: None,
+                tokens: TokenCounts { input: 50_000, output: 12_000, cache_read: 80_000, cache_write: 5_000, reasoning: 0 },
+                dedup_key: "claude-apr-1".into(),
+                known_cost_usd: None,
+                byok_usage_inference: None,
+            },
+            UsageEvent {
+                source: Source::Claude,
+                month: YearMonth::new(2026, 5),
+                model: ModelSlug::new("anthropic/claude-sonnet-4.6"),
+                provider: "anthropic".into(),
+                project: None,
+                tokens: TokenCounts { input: 120_000, output: 30_000, cache_read: 200_000, cache_write: 15_000, reasoning: 0 },
+                dedup_key: "claude-may-1".into(),
+                known_cost_usd: None,
+                byok_usage_inference: None,
+            },
+            UsageEvent {
+                source: Source::Codex,
+                month: YearMonth::new(2026, 4),
+                model: ModelSlug::new("openai/codex-mini"),
+                provider: "openai".into(),
+                project: None,
+                tokens: TokenCounts { input: 10_000, output: 3_000, cache_read: 0, cache_write: 0, reasoning: 5_000 },
+                dedup_key: "codex-apr-1".into(),
+                known_cost_usd: None,
+                byok_usage_inference: None,
+            },
+            UsageEvent {
+                source: Source::Gemini,
+                month: YearMonth::new(2026, 5),
+                model: ModelSlug::new("google/gemini-2.5-pro"),
+                provider: "google".into(),
+                project: None,
+                tokens: TokenCounts { input: 75_000, output: 20_000, cache_read: 0, cache_write: 0, reasoning: 40_000 },
+                dedup_key: "gemini-may-1".into(),
+                known_cost_usd: None,
+                byok_usage_inference: None,
+            },
+            UsageEvent {
+                source: Source::Pi,
+                month: YearMonth::new(2026, 4),
+                model: ModelSlug::new("anthropic/claude-sonnet-4.6"),
+                provider: "anthropic".into(),
+                project: None,
+                tokens: TokenCounts { input: 8_000, output: 2_500, cache_read: 15_000, cache_write: 1_000, reasoning: 0 },
+                dedup_key: "pi-apr-1".into(),
+                known_cost_usd: None,
+                byok_usage_inference: None,
+            },
+            UsageEvent {
+                source: Source::OpenCode,
+                month: YearMonth::new(2026, 5),
+                model: ModelSlug::new("anthropic/claude-sonnet-4.6"),
+                provider: "anthropic".into(),
+                project: None,
+                tokens: TokenCounts { input: 45_000, output: 11_000, cache_read: 60_000, cache_write: 4_000, reasoning: 0 },
+                dedup_key: "opencode-may-1".into(),
+                known_cost_usd: None,
+                byok_usage_inference: None,
+            },
+            UsageEvent {
+                source: Source::OpenRouter,
+                month: YearMonth::new(2026, 5),
+                model: ModelSlug::new("anthropic/claude-opus-4.7"),
+                provider: "anthropic".into(),
+                project: None,
+                tokens: TokenCounts { input: 25_000, output: 8_000, cache_read: 0, cache_write: 0, reasoning: 0 },
+                dedup_key: "openrouter-may-1".into(),
+                known_cost_usd: Some(1.65),
+                byok_usage_inference: None,
+            },
+        ]
+    }
+
+    fn fixture_pricing() -> HashMap<ModelSlug, Pricing> {
+        let mut p = HashMap::new();
+        p.insert(ModelSlug::new("anthropic/claude-opus-4.7"), Pricing {
+            input_per_token: 0.000_015,
+            output_per_token: 0.000_075,
+            cache_read_per_token: 0.000_001_5,
+            cache_write_per_token: 0.000_018_75,
+            reasoning_per_token: None,
+        });
+        p.insert(ModelSlug::new("anthropic/claude-sonnet-4.6"), Pricing {
+            input_per_token: 0.000_003,
+            output_per_token: 0.000_015,
+            cache_read_per_token: 0.000_000_3,
+            cache_write_per_token: 0.000_003_75,
+            reasoning_per_token: None,
+        });
+        p.insert(ModelSlug::new("google/gemini-2.5-pro"), Pricing {
+            input_per_token: 0.000_001_25,
+            output_per_token: 0.000_010,
+            cache_read_per_token: 0.0,
+            cache_write_per_token: 0.0,
+            reasoning_per_token: Some(0.000_010),
+        });
+        p
+    }
+
+    #[test]
+    fn snapshot_table_default() {
+        let events = fixture_events();
+        let pricing = fixture_pricing();
+        let by = BySpec::default();
+        let aggregated = aggregate(&events, &by);
+        let out = format_table(&aggregated, &pricing, None, &by);
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn snapshot_table_with_balance() {
+        let events = fixture_events();
+        let pricing = fixture_pricing();
+        let by = BySpec::default();
+        let aggregated = aggregate(&events, &by);
+        let balance = OpenRouterSummary {
+            total_credits: 100.0,
+            total_usage: 25.50,
+            fetched_at: "2026-05-11T12:00:00Z".into(),
+        };
+        let out = format_table(&aggregated, &pricing, Some(&balance), &by);
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn snapshot_table_by_source() {
+        let events = fixture_events();
+        let pricing = fixture_pricing();
+        let by = BySpec::parse("source").expect("valid");
+        let aggregated = aggregate(&events, &by);
+        let out = format_table(&aggregated, &pricing, None, &by);
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn snapshot_json_default() {
+        let events = fixture_events();
+        let pricing = fixture_pricing();
+        let by = BySpec::default();
+        let out = format_json(&events, &pricing, None, &by);
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn snapshot_json_with_balance() {
+        let events = fixture_events();
+        let pricing = fixture_pricing();
+        let by = BySpec::default();
+        let balance = OpenRouterSummary {
+            total_credits: 100.0,
+            total_usage: 25.50,
+            fetched_at: "2026-05-11T12:00:00Z".into(),
+        };
+        let out = format_json(&events, &pricing, Some(&balance), &by);
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn snapshot_json_by_source() {
+        let events = fixture_events();
+        let pricing = fixture_pricing();
+        let by = BySpec::parse("source").expect("valid");
+        let out = format_json(&events, &pricing, None, &by);
+        insta::assert_snapshot!(out);
     }
 }

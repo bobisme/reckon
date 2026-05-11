@@ -1,0 +1,97 @@
+---
+source: crates/reckon-cli/src/render.rs
+expression: out
+---
+[
+  {
+    "cache_read": 200000,
+    "cache_write": 15000,
+    "cost_usd": 0.0,
+    "input": 120000,
+    "month": "2026-05",
+    "output": 30000,
+    "reasoning": 0,
+    "source": "claude"
+  },
+  {
+    "cache_read": 0,
+    "cache_write": 0,
+    "cost_usd": 0.0,
+    "input": 75000,
+    "month": "2026-05",
+    "output": 20000,
+    "reasoning": 40000,
+    "source": "gemini"
+  },
+  {
+    "cache_read": 60000,
+    "cache_write": 4000,
+    "cost_usd": 0.0,
+    "input": 45000,
+    "month": "2026-05",
+    "output": 11000,
+    "reasoning": 0,
+    "source": "opencode"
+  },
+  {
+    "cache_read": 0,
+    "cache_write": 0,
+    "cost_usd": 0.0,
+    "input": 25000,
+    "known_cost_usd": 1.65,
+    "month": "2026-05",
+    "output": 8000,
+    "reasoning": 0,
+    "source": "openrouter"
+  },
+  {
+    "cache_read": 260000,
+    "cache_write": 19000,
+    "cost_usd": 0.0,
+    "input": 265000,
+    "month": "2026-05",
+    "output": 69000,
+    "reasoning": 40000,
+    "source": "TOTAL"
+  },
+  {
+    "cache_read": 80000,
+    "cache_write": 5000,
+    "cost_usd": 0.0,
+    "input": 50000,
+    "month": "2026-04",
+    "output": 12000,
+    "reasoning": 0,
+    "source": "claude"
+  },
+  {
+    "cache_read": 0,
+    "cache_write": 0,
+    "cost_usd": 0.0,
+    "input": 10000,
+    "month": "2026-04",
+    "output": 3000,
+    "reasoning": 5000,
+    "source": "codex"
+  },
+  {
+    "cache_read": 15000,
+    "cache_write": 1000,
+    "cost_usd": 0.0,
+    "input": 8000,
+    "month": "2026-04",
+    "output": 2500,
+    "reasoning": 0,
+    "source": "pi"
+  },
+  {
+    "cache_read": 95000,
+    "cache_write": 6000,
+    "cost_usd": 0.0,
+    "input": 68000,
+    "month": "2026-04",
+    "output": 17500,
+    "reasoning": 5000,
+    "source": "TOTAL"
+  }
+]

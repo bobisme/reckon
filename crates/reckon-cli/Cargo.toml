@@ -12,6 +12,7 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3"
+insta = { version = "1", features = ["json"] }
 
 [dependencies]
 reckon-core = { path = "../reckon-core" }
