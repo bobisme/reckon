@@ -1,6 +1,8 @@
+pub mod cache;
 pub mod model_map;
 pub mod pricing;
 
+pub use cache::open_cache;
 pub use pricing::{Pricing, cost, load_pricing, load_pricing_fallback};
 
 use std::fmt;

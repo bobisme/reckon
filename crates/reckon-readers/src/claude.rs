@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::{env, fs, io};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use asupersync::{Cx, Outcome};
 use async_trait::async_trait;
@@ -185,7 +186,21 @@ async fn scan_jsonl_file(
         sink.send(cx, event).await.map_err(ScanError::Sink)?;
     }
 
+    let metadata = fs::metadata(path).map_err(ScanError::Io)?;
+    let mtime_ns = file_modified_nanos(metadata.modified().map_err(ScanError::Io)?).map_err(ScanError::Io)?;
+    let size_bytes = i64::try_from(metadata.len()).expect("file size too large");
+    sink.record_source_file(Source::Claude, path, mtime_ns, size_bytes, size_bytes);
+
     Ok(())
+}
+
+fn file_modified_nanos(modified: SystemTime) -> Result<i64, io::Error> {
+    modified
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?
+        .as_nanos()
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "mtime too large for i64"))
 }
 
 fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
@@ -248,9 +263,11 @@ mod tests {
 
     use asupersync::lab::{LabConfig, LabRuntime};
     use asupersync::Budget;
+    use reckon_core::open_cache;
 
     use super::*;
-    use crate::run_readers;
+    use crate::{run_readers, run_readers_with_cache};
+    use tempfile::TempDir;
 
     #[test]
     fn parse_iso8601_basic() {
@@ -383,6 +400,41 @@ mod tests {
 
         let unique: HashSet<&str> = dedup_keys.into_iter().collect();
         assert_eq!(unique.len(), 2);
+    }
+
+    #[test]
+    fn cached_scan_records_source_file_offsets() {
+        let fixture_dir = fixture_path("claude");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let projects_dir = tmp.path().join("projects").join("-test-project");
+        fs::create_dir_all(&projects_dir).expect("create dirs");
+        fs::copy(fixture_dir.join("sample.jsonl"), projects_dir.join("sample.jsonl")).expect("copy fixture");
+
+        let cache_dir = TempDir::new().expect("temp cache dir");
+        let cache_path = cache_dir.path().join("index.sqlite");
+        let cache_path_for_run = cache_path.clone();
+
+        let rows = run_on_lab(73, {
+            let cache_path = cache_path_for_run;
+            let reader = ClaudeReader::with_root(tmp.path().to_path_buf());
+            move |cx| {
+                Box::pin(async move {
+                    run_readers_with_cache(&cx, vec![Box::new(reader)], &cache_path).await;
+
+                    let conn = open_cache(&cache_path);
+                    let count: i64 = conn
+                        .query_row(
+                            "SELECT COUNT(*) FROM source_files",
+                            [],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .expect("query source_files count");
+                    count
+                })
+            }
+        });
+
+        assert_eq!(rows, 1);
     }
 
     #[test]
