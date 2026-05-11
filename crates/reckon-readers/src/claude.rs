@@ -181,6 +181,8 @@ async fn scan_jsonl_file(
                 reasoning: 0,
             },
             dedup_key: request_id,
+            known_cost_usd: None,
+            byok_usage_inference: None,
         };
 
         sink.send(cx, event).await.map_err(ScanError::Sink)?;

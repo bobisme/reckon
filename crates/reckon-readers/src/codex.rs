@@ -228,6 +228,8 @@ impl CodexSessionState {
             project: self.project.clone(),
             tokens: delta,
             dedup_key: format!("{session_id}:{turn_index}"),
+            known_cost_usd: None,
+            byok_usage_inference: None,
         })
     }
 }
@@ -676,6 +678,8 @@ mod tests {
                         reasoning: 5,
                     },
                     dedup_key: "session-123:0".into(),
+                    known_cost_usd: None,
+                    byok_usage_inference: None,
                 },
                 UsageEvent {
                     source: Source::Codex,
@@ -691,6 +695,8 @@ mod tests {
                         reasoning: 1,
                     },
                     dedup_key: "session-123:1".into(),
+                    known_cost_usd: None,
+                    byok_usage_inference: None,
                 },
                 UsageEvent {
                     source: Source::Codex,
@@ -706,6 +712,8 @@ mod tests {
                         reasoning: 2,
                     },
                     dedup_key: "session-123:2".into(),
+                    known_cost_usd: None,
+                    byok_usage_inference: None,
                 },
             ]
         );

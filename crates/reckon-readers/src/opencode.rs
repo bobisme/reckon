@@ -234,6 +234,8 @@ fn parse_legacy_message(path: &Path) -> Result<Option<UsageEvent>, ReaderError> 
         project: None,
         tokens,
         dedup_key: message.id,
+        known_cost_usd: None,
+        byok_usage_inference: None,
     }))
 }
 
@@ -318,6 +320,8 @@ impl OpenCodeReader {
                     project: None,
                     tokens: row.tokens,
                     dedup_key: row.id,
+                    known_cost_usd: None,
+                    byok_usage_inference: None,
                 };
 
                 match sink.send(cx, event).await {

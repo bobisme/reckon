@@ -197,8 +197,8 @@ impl Sink {
 
 fn persist_events(conn: &mut Connection, events: &mut Vec<UsageEvent>) {
     let stmt = "INSERT OR IGNORE INTO events \
-        (source, dedup_key, month, model, provider, project, input, output, cache_read, cache_write, reasoning) \
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)";
+        (source, dedup_key, month, model, provider, project, input, output, cache_read, cache_write, reasoning, known_cost_usd, byok_usage_inference) \
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
 
     for chunk in events.chunks(EVENT_BATCH_SIZE) {
         let tx = conn.transaction().expect("failed to begin cache events transaction");
@@ -217,6 +217,8 @@ fn persist_events(conn: &mut Connection, events: &mut Vec<UsageEvent>) {
                     event.tokens.cache_read,
                     event.tokens.cache_write,
                     event.tokens.reasoning,
+                    event.known_cost_usd,
+                    event.byok_usage_inference,
                 ],
             )
             .expect("failed to persist usage event");
@@ -419,6 +421,8 @@ mod tests {
                 reasoning: 0,
             },
             dedup_key: format!("{source}-{index}"),
+            known_cost_usd: None,
+            byok_usage_inference: None,
         }
     }
 

@@ -60,6 +60,8 @@ mod tests {
                 reasoning: 0,
             },
             dedup_key: dedup.into(),
+            known_cost_usd: None,
+            byok_usage_inference: None,
         }
     }
 

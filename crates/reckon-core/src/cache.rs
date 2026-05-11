@@ -3,7 +3,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Result};
 
-const CACHE_SCHEMA_VERSION: i32 = 1;
+const CACHE_SCHEMA_VERSION: i32 = 2;
 
 /// # Panics
 ///
@@ -71,6 +71,8 @@ fn apply_wal_and_schema(conn: &Connection) {
                     cache_read INTEGER NOT NULL DEFAULT 0,
                     cache_write INTEGER NOT NULL DEFAULT 0,
                     reasoning INTEGER NOT NULL DEFAULT 0,
+                    known_cost_usd REAL,
+                    byok_usage_inference INTEGER,
                     PRIMARY KEY (source, dedup_key)
                 );
 
@@ -78,6 +80,18 @@ fn apply_wal_and_schema(conn: &Connection) {
                 ",
             )
             .unwrap_or_else(|error| panic!("failed to create cache schema: {error}"));
+
+            conn.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)
+                .expect("failed to set cache schema version");
+        }
+        1 => {
+            conn.execute_batch(
+                "
+                ALTER TABLE events ADD COLUMN known_cost_usd REAL;
+                ALTER TABLE events ADD COLUMN byok_usage_inference INTEGER;
+                ",
+            )
+            .unwrap_or_else(|error| panic!("failed to migrate cache schema to v2: {error}"));
 
             conn.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)
                 .expect("failed to set cache schema version");

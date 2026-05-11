@@ -246,6 +246,8 @@ async fn scan_session_file(
             project: project.clone(),
             tokens,
             dedup_key: format!("{file_name}:{index}"),
+            known_cost_usd: None,
+            byok_usage_inference: None,
         };
 
         sink.send(cx, event).await.map_err(ScanError::Sink)?;

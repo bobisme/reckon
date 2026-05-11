@@ -144,7 +144,7 @@ impl AddAssign for TokenCounts {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageEvent {
     pub source: Source,
     pub month: YearMonth,
@@ -153,6 +153,10 @@ pub struct UsageEvent {
     pub project: Option<String>,
     pub tokens: TokenCounts,
     pub dedup_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub known_cost_usd: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byok_usage_inference: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,6 +209,8 @@ mod tests {
                 reasoning: 50,
             },
             dedup_key: "req-12345".into(),
+            known_cost_usd: None,
+            byok_usage_inference: None,
         };
 
         let json = serde_json::to_string(&event).expect("serialize");
@@ -299,6 +305,8 @@ mod proptest_roundtrip {
                 project,
                 tokens,
                 dedup_key,
+                known_cost_usd: None,
+                byok_usage_inference: None,
             };
             let json = serde_json::to_string(&event).expect("serialize");
             let back: UsageEvent = serde_json::from_str(&json).expect("deserialize");

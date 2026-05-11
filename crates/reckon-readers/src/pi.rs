@@ -396,6 +396,8 @@ async fn scan_pi_session_file(
                 reasoning: 0,
             },
             dedup_key: format!("{}:{}", tuple.session_id, message_id),
+            known_cost_usd: None,
+            byok_usage_inference: None,
         };
 
         sink.send(cx, event).await.map_err(ScanError::Sink)?;
