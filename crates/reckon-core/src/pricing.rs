@@ -24,12 +24,6 @@ struct LiteLLMEntry {
     output_cost_per_reasoning_token: Option<f64>,
 }
 
-#[derive(Debug, Clone)]
-struct CanonicalModelSlug {
-    vendor: String,
-    model: String,
-}
-
 /// # Panics
 ///
 /// Panics if the file cannot be read or parsed as JSON.
@@ -87,7 +81,7 @@ pub fn load_pricing_from_str(body: &str) -> HashMap<ModelSlug, Pricing> {
 
     let mut out = HashMap::new();
     for (raw_slug, entry) in raw {
-        if let Some(model) = canonical_slug(&raw_slug) {
+        if let Some(canonical) = canonical_slug(&raw_slug) {
             let Some(input_per_token) = entry.input_cost_per_token else {
                 continue;
             };
@@ -95,7 +89,6 @@ pub fn load_pricing_from_str(body: &str) -> HashMap<ModelSlug, Pricing> {
                 continue;
             };
 
-            let canonical = ModelSlug::new(format!("{}/{}", model.vendor, model.model));
             let pricing = Pricing {
                 input_per_token,
                 output_per_token,
@@ -125,7 +118,7 @@ pub fn cost(tokens: &TokenCounts, pricing: &Pricing) -> f64 {
     (tokens.reasoning as f64).mul_add(reasoning_per_token, acc)
 }
 
-fn canonical_slug(raw: &str) -> Option<CanonicalModelSlug> {
+fn canonical_slug(raw: &str) -> Option<ModelSlug> {
     if raw.is_empty() || raw == "sample_spec" {
         return None;
     }
@@ -134,14 +127,23 @@ fn canonical_slug(raw: &str) -> Option<CanonicalModelSlug> {
         return canonical_slug_from_slash(raw);
     }
 
-    if raw.contains('.') {
-        return canonical_slug_from_dot(raw);
+    // Dotted keys like `eu.anthropic.claude-opus-4-7` are bedrock-style
+    // "region.vendor.model" — strip the region and re-split into vendor/model.
+    // For any other dotted key (e.g. `gpt-5.5`, `gemini-3.1-pro-preview`,
+    // `anthropic.claude-3-opus-...`) the dot is part of the model name itself,
+    // so we index by the raw key. Readers either emit the raw key as-is or
+    // map it via `model_map` to a slash-form vendor/model slug; we cover both
+    // shapes by inserting only the raw key here and letting the slash-prefixed
+    // duplicates in pricing-fallback (`openrouter/<vendor>/<model>`, etc.)
+    // populate the slash form.
+    if let Some(rest) = strip_region_prefix(raw) {
+        return canonical_slug_from_dotted_region(rest);
     }
 
-    None
+    Some(ModelSlug::new(raw))
 }
 
-fn canonical_slug_from_slash(raw: &str) -> Option<CanonicalModelSlug> {
+fn canonical_slug_from_slash(raw: &str) -> Option<ModelSlug> {
     let mut current = raw;
     loop {
         if let Some((
@@ -164,43 +166,34 @@ fn canonical_slug_from_slash(raw: &str) -> Option<CanonicalModelSlug> {
     let vendor = parts[parts.len() - 2];
     let model = parts[parts.len() - 1];
 
-    Some(CanonicalModelSlug {
-        vendor: normalize_vendor(vendor).to_string(),
-        model: model.to_string(),
-    })
+    Some(ModelSlug::new(format!(
+        "{}/{}",
+        normalize_vendor(vendor),
+        model
+    )))
 }
 
-fn canonical_slug_from_dot(raw: &str) -> Option<CanonicalModelSlug> {
-    let mut parts = raw.split('.');
-    let first = parts.next()?;
-    let second = parts.next()?;
-    let rest: Vec<&str> = parts.collect();
+/// Given the portion of a bedrock-style key after the region prefix
+/// (e.g. `anthropic.claude-opus-4-7` from `eu.anthropic.claude-opus-4-7`),
+/// split into `vendor/model` form. Returns None if the input has no dot.
+fn canonical_slug_from_dotted_region(rest: &str) -> Option<ModelSlug> {
+    let (vendor, model) = rest.split_once('.')?;
+    Some(ModelSlug::new(format!(
+        "{}/{}",
+        normalize_vendor(vendor),
+        model
+    )))
+}
 
-    if rest.is_empty() {
-        return Some(CanonicalModelSlug {
-            vendor: normalize_vendor(first).to_string(),
-            model: second.to_string(),
-        });
+/// If `raw` starts with a known region prefix followed by `.`, return the
+/// remainder. Otherwise return None.
+fn strip_region_prefix(raw: &str) -> Option<&str> {
+    let (prefix, rest) = raw.split_once('.')?;
+    if is_region_prefix(prefix) {
+        Some(rest)
+    } else {
+        None
     }
-
-    if is_region_prefix(first) {
-        let mut joined = vec![second];
-        joined.extend(rest);
-        let dotted = joined.join(".");
-        let (vendor, model) = dotted.split_once('.')?;
-        return Some(CanonicalModelSlug {
-            vendor: normalize_vendor(vendor).to_string(),
-            model: model.to_string(),
-        });
-    }
-
-    Some(CanonicalModelSlug {
-        vendor: normalize_vendor(first).to_string(),
-        model: core::iter::once(second)
-            .chain(rest)
-            .collect::<Vec<_>>()
-            .join("."),
-    })
 }
 
 fn is_region_prefix(prefix: &str) -> bool {
@@ -306,26 +299,61 @@ mod tests {
     #[test]
     fn canonical_slug_supports_openrouter_and_aliases() {
         let slug = canonical_slug("openrouter/openai/gpt-5.2").expect("expected canonical slug");
-        assert_eq!(format!("{}/{}", slug.vendor, slug.model), "openai/gpt-5.2");
+        assert_eq!(slug.as_str(), "openai/gpt-5.2");
 
         let slug =
             canonical_slug("deepinfra/google/gemini-2.5-pro").expect("expected canonical slug");
-        assert_eq!(
-            format!("{}/{}", slug.vendor, slug.model),
-            "google/gemini-2.5-pro"
-        );
+        assert_eq!(slug.as_str(), "google/gemini-2.5-pro");
 
-        let slug = canonical_slug("anthropic.claude-opus-4.7").expect("expected canonical slug");
-        assert_eq!(
-            format!("{}/{}", slug.vendor, slug.model),
-            "anthropic/claude-opus-4.7"
-        );
-
+        // Region-prefixed bedrock-style keys still split into vendor/model.
         let slug =
             canonical_slug("global.anthropic.claude-opus-4-7").expect("expected canonical slug");
-        assert_eq!(
-            format!("{}/{}", slug.vendor, slug.model),
-            "anthropic/claude-opus-4-7"
+        assert_eq!(slug.as_str(), "anthropic/claude-opus-4-7");
+
+        let slug =
+            canonical_slug("eu.anthropic.claude-opus-4-7").expect("expected canonical slug");
+        assert_eq!(slug.as_str(), "anthropic/claude-opus-4-7");
+    }
+
+    #[test]
+    fn canonical_slug_uses_raw_for_non_region_dotted() {
+        // Non-region dotted keys: the dot is part of the model name, not
+        // a vendor separator. Index by the raw key so it matches what
+        // readers/model_map emit.
+        let slug = canonical_slug("gpt-5.5").expect("expected canonical slug");
+        assert_eq!(slug.as_str(), "gpt-5.5");
+
+        let slug = canonical_slug("gemini-3.1-pro-preview").expect("expected canonical slug");
+        assert_eq!(slug.as_str(), "gemini-3.1-pro-preview");
+
+        // `anthropic.<model>` is bedrock-style but without a region prefix;
+        // treat it as raw since the reader path for Claude routes to
+        // `anthropic/claude-...` (slash form) which is populated by other
+        // entries in pricing-fallback (openrouter/anthropic/..., etc.).
+        let slug = canonical_slug("anthropic.claude-opus-4-7").expect("expected canonical slug");
+        assert_eq!(slug.as_str(), "anthropic.claude-opus-4-7");
+    }
+
+    #[test]
+    fn canonical_slug_uses_raw_for_no_separator() {
+        // Keys with neither `/` nor `.` (the bug case) must produce a slug.
+        let slug = canonical_slug("gemini-3-flash-preview").expect("expected canonical slug");
+        assert_eq!(slug.as_str(), "gemini-3-flash-preview");
+
+        let slug = canonical_slug("gemini-3-pro-preview").expect("expected canonical slug");
+        assert_eq!(slug.as_str(), "gemini-3-pro-preview");
+    }
+
+    #[test]
+    fn pricing_fallback_resolves_gemini_3_and_gpt_5_5() {
+        let pricing = load_pricing_fallback();
+        assert!(
+            pricing.contains_key(&ModelSlug::new("gemini-3-flash-preview")),
+            "gemini-3-flash-preview must be resolvable from pricing-fallback"
+        );
+        assert!(
+            pricing.contains_key(&ModelSlug::new("gpt-5.5")),
+            "gpt-5.5 must be resolvable from pricing-fallback"
         );
     }
 

@@ -42,22 +42,48 @@ fn claude_canonical(raw: &str) -> Option<ModelSlug> {
 }
 
 fn openai_canonical(raw: &str) -> Option<ModelSlug> {
+    // OpenAI-family pricing keys with `openai/` prefix in pricing-fallback
+    // map to `openai/<family>`. Keys that appear in pricing-fallback as bare
+    // (no `openai/` prefix, no `/`) — like `gpt-5.4`, `gpt-5.5` — must map
+    // to the raw key so it matches the pricing index. Order matters: longer
+    // prefixes must come first so `gpt-5.4-mini` matches `gpt-5.4` not
+    // `gpt-5`.
     let families: &[(&str, &str)] = &[
-        ("gpt-5.2", "gpt-5.2"),
-        ("gpt-4.1", "gpt-4.1"),
-        ("o1", "o1"),
-        ("o3-mini", "o3-mini"),
+        ("gpt-5.5-pro", "gpt-5.5-pro"),
+        ("gpt-5.5", "gpt-5.5"),
+        ("gpt-5.4-pro", "gpt-5.4-pro"),
+        ("gpt-5.4-mini", "gpt-5.4-mini"),
+        ("gpt-5.4-nano", "gpt-5.4-nano"),
+        ("gpt-5.4", "gpt-5.4"),
+        ("gpt-5.3-codex", "gpt-5.3-codex"),
+        ("gpt-5.3-chat-latest", "gpt-5.3-chat-latest"),
+        ("gpt-5.2", "openai/gpt-5.2"),
+        ("gpt-4.1", "openai/gpt-4.1"),
+        ("o1", "openai/o1"),
+        ("o3-mini", "openai/o3-mini"),
     ];
     for &(prefix, canonical) in families {
         if raw == prefix || raw.starts_with(&format!("{prefix}-")) {
-            return Some(ModelSlug(format!("openai/{canonical}")));
+            return Some(ModelSlug(canonical.into()));
         }
     }
     None
 }
 
 fn gemini_canonical(raw: &str) -> Option<ModelSlug> {
+    // Gemini-3 entries in pricing-fallback live under bare keys without a
+    // `google/` prefix, so map to the raw form. Gemini-2.5 / 1.5 retain the
+    // `google/` prefix because pricing-fallback also indexes slash-prefixed
+    // duplicates (vertex_ai/..., openrouter/google/..., gemini/...). Order
+    // matters: longer prefixes must come first.
     let families: &[(&str, &str)] = &[
+        ("gemini-3.1-pro-preview", "gemini-3.1-pro-preview"),
+        ("gemini-3.1-flash-image-preview", "gemini-3.1-flash-image-preview"),
+        ("gemini-3.1-flash-lite-preview", "gemini-3.1-flash-lite-preview"),
+        ("gemini-3.1-flash-live-preview", "gemini-3.1-flash-live-preview"),
+        ("gemini-3-pro-image-preview", "gemini-3-pro-image-preview"),
+        ("gemini-3-pro-preview", "gemini-3-pro-preview"),
+        ("gemini-3-flash-preview", "gemini-3-flash-preview"),
         ("gemini-2.5-pro", "google/gemini-2.5-pro"),
         ("gemini-2.5-flash", "google/gemini-2.5-flash"),
         ("gemini-1.5-pro", "google/gemini-1.5-pro"),
@@ -238,5 +264,47 @@ mod tests {
     fn opencode_without_provider_passes_through() {
         let slug = canonical(Source::OpenCode, "gpt-5.2", None);
         assert_eq!(slug.as_str(), "gpt-5.2");
+    }
+
+    #[test]
+    fn gemini_3_flash_preview_bare() {
+        let slug = canonical(Source::Gemini, "gemini-3-flash-preview", None);
+        assert_eq!(slug.as_str(), "gemini-3-flash-preview");
+    }
+
+    #[test]
+    fn gemini_3_flash_preview_with_suffix() {
+        let slug = canonical(Source::Gemini, "gemini-3-flash-preview-001", None);
+        assert_eq!(slug.as_str(), "gemini-3-flash-preview");
+    }
+
+    #[test]
+    fn gemini_3_pro_preview_bare() {
+        let slug = canonical(Source::Gemini, "gemini-3-pro-preview", None);
+        assert_eq!(slug.as_str(), "gemini-3-pro-preview");
+    }
+
+    #[test]
+    fn gemini_3_1_pro_preview_with_suffix() {
+        let slug = canonical(Source::Gemini, "gemini-3.1-pro-preview-001", None);
+        assert_eq!(slug.as_str(), "gemini-3.1-pro-preview");
+    }
+
+    #[test]
+    fn openai_gpt_5_5_with_date() {
+        let slug = canonical(Source::Codex, "gpt-5.5-2026-04-01", None);
+        assert_eq!(slug.as_str(), "gpt-5.5");
+    }
+
+    #[test]
+    fn openai_gpt_5_4_bare() {
+        let slug = canonical(Source::Codex, "gpt-5.4", None);
+        assert_eq!(slug.as_str(), "gpt-5.4");
+    }
+
+    #[test]
+    fn openai_gpt_5_4_mini_with_date() {
+        let slug = canonical(Source::Codex, "gpt-5.4-mini-2026-03-17", None);
+        assert_eq!(slug.as_str(), "gpt-5.4-mini");
     }
 }
