@@ -13,9 +13,9 @@ const OPENROUTER_AUTH_ERROR_MESSAGE: &str =
 pub enum OpenRouterErrorKind {
     /// Authentication failure (HTTP 401).
     Auth,
-    /// Network-transport failure while contacting OpenRouter.
+    /// Network-transport failure while contacting `OpenRouter`.
     Network,
-    /// HTTP error from OpenRouter (all non-401 status codes).
+    /// HTTP error from `OpenRouter` (all non-401 status codes).
     Upstream,
 }
 
@@ -23,9 +23,9 @@ pub enum OpenRouterErrorKind {
 pub enum OpenRouterExitCode {
     /// No error (success).
     Success,
-    /// Auth error (OpenRouter key not accepted as management key).
+    /// Auth error (`OpenRouter` key not accepted as management key).
     Auth,
-    /// Network failure while making OpenRouter request.
+    /// Network failure while making `OpenRouter` request.
     Network,
     /// Other CLI/runtime failure.
     Other,
@@ -59,7 +59,7 @@ impl OpenRouterError {
 
     /// Return the exit code corresponding to this error.
     #[must_use]
-    pub fn exit_code(&self) -> OpenRouterExitCode {
+    pub const fn exit_code(&self) -> OpenRouterExitCode {
         match self.kind {
             OpenRouterErrorKind::Auth => OpenRouterExitCode::Auth,
             OpenRouterErrorKind::Network => OpenRouterExitCode::Network,
@@ -74,7 +74,7 @@ pub fn management_api_key_error(key: &str) -> String {
     OPENROUTER_AUTH_ERROR_MESSAGE.replace("{}", &mask_key(key))
 }
 
-/// Translate an HTTP response from OpenRouter into an actionable error.
+/// Translate an HTTP response from `OpenRouter` into an actionable error.
 ///
 /// Returns `None` for 2xx responses.
 #[must_use]
@@ -92,7 +92,7 @@ pub fn classify_openrouter_response(key: &str, response: &Response) -> Option<Op
     } else {
         let body = response
             .text()
-            .map_or_else(|_| "".to_owned(), |body| body.to_string());
+            .map_or_else(|_| String::new(), std::string::ToString::to_string);
         Some(OpenRouterError::new(
             OpenRouterErrorKind::Upstream,
             Some(response.status),
@@ -101,7 +101,7 @@ pub fn classify_openrouter_response(key: &str, response: &Response) -> Option<Op
     }
 }
 
-/// Translate a transport error while contacting OpenRouter.
+/// Translate a transport error while contacting `OpenRouter`.
 #[must_use]
 pub fn classify_openrouter_network_error(error: &ClientError) -> OpenRouterError {
     OpenRouterError::new(OpenRouterErrorKind::Network, None, error.to_string())
