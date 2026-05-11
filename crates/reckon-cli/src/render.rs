@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, HashMap};
 
-use reckon_core::{ModelSlug, Pricing, Source, TokenCounts, YearMonth, cost};
+use reckon_core::{cost, ModelSlug, Pricing, Source, TokenCounts, YearMonth};
 use tabled::settings::object::Columns;
 use tabled::settings::{Alignment, Style};
 use tabled::{Table, Tabled};
 
-use crate::report::{AggregateKey, month_totals};
+use crate::report::{month_totals, AggregateKey};
 
 #[derive(Tabled)]
 struct Row {
@@ -30,7 +30,6 @@ struct Row {
 pub fn print_table(
     aggregated: &BTreeMap<AggregateKey, TokenCounts>,
     pricing: &HashMap<ModelSlug, Pricing>,
-    unknown_models: &mut Vec<String>,
 ) {
     let totals = month_totals(aggregated);
     let months: Vec<YearMonth> = totals.keys().copied().collect();
@@ -38,19 +37,14 @@ pub fn print_table(
     let mut rows = Vec::new();
     for month in months.iter().rev() {
         let month_rows: Vec<_> = aggregated
-            .range((*month, Source::Claude, ModelSlug::new(""))..=(*month, Source::OpenRouter, ModelSlug::new("\u{10FFFF}")))
+            .range(
+                (*month, Source::Claude, ModelSlug::new(""))
+                    ..=(*month, Source::OpenRouter, ModelSlug::new("\u{10FFFF}")),
+            )
             .collect();
 
         for ((_, source, model), tokens) in &month_rows {
-            let model_cost = pricing.get(model).map_or_else(
-                || {
-                    if !unknown_models.contains(&model.0) {
-                        unknown_models.push(model.0.clone());
-                    }
-                    0.0
-                },
-                |p| cost(tokens, p),
-            );
+            let model_cost = pricing.get(model).map_or(0.0, |p| cost(tokens, p));
 
             rows.push(Row {
                 month: month.to_string(),
@@ -67,9 +61,7 @@ pub fn print_table(
         let total_tokens = &totals[month];
         let total_cost: f64 = month_rows
             .iter()
-            .map(|((_, _, model), tokens)| {
-                pricing.get(model).map_or(0.0, |p| cost(tokens, p))
-            })
+            .map(|((_, _, model), tokens)| pricing.get(model).map_or(0.0, |p| cost(tokens, p)))
             .sum();
 
         rows.push(Row {

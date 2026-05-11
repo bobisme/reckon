@@ -1,6 +1,6 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use reckon_core::{ModelSlug, Source, TokenCounts, UsageEvent, YearMonth};
+use reckon_core::{ModelSlug, Pricing, Source, TokenCounts, UsageEvent, YearMonth};
 
 pub type AggregateKey = (YearMonth, Source, ModelSlug);
 
@@ -11,7 +11,8 @@ pub fn aggregate(events: Vec<UsageEvent>) -> BTreeMap<AggregateKey, TokenCounts>
         if !seen.insert(event.dedup_key) {
             continue;
         }
-        *map.entry((event.month, event.source, event.model)).or_default() += event.tokens;
+        *map.entry((event.month, event.source, event.model))
+            .or_default() += event.tokens;
     }
     map
 }
@@ -22,6 +23,22 @@ pub fn month_totals(map: &BTreeMap<AggregateKey, TokenCounts>) -> BTreeMap<YearM
         *totals.entry(*month).or_default() += *tokens;
     }
     totals
+}
+
+pub fn unknown_model_slugs(
+    aggregated: &BTreeMap<AggregateKey, TokenCounts>,
+    pricing: &HashMap<ModelSlug, Pricing>,
+) -> HashSet<ModelSlug> {
+    aggregated
+        .keys()
+        .filter_map(|(_, _, model)| {
+            if pricing.contains_key(model) {
+                None
+            } else {
+                Some(model.clone())
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -81,12 +98,48 @@ mod tests {
     fn month_totals_sum_correctly() {
         let events = vec![
             event(5, Source::Claude, "anthropic/claude-opus-4.7", 100, "req-1"),
-            event(5, Source::Claude, "anthropic/claude-sonnet-4.6", 50, "req-2"),
+            event(
+                5,
+                Source::Claude,
+                "anthropic/claude-sonnet-4.6",
+                50,
+                "req-2",
+            ),
             event(4, Source::Claude, "anthropic/claude-opus-4.7", 200, "req-3"),
         ];
         let agg = aggregate(events);
         let totals = month_totals(&agg);
         assert_eq!(totals[&YearMonth::new(2026, 5)].input, 150);
         assert_eq!(totals[&YearMonth::new(2026, 4)].input, 200);
+    }
+
+    #[test]
+    fn unknown_model_slugs_collect_unknown_models() {
+        let events = vec![
+            event(5, Source::Claude, "known/model", 100, "req-1"),
+            event(5, Source::Claude, "vendor/unknown-a", 100, "req-2"),
+            event(5, Source::Claude, "vendor/unknown-b", 100, "req-3"),
+        ];
+        let agg = aggregate(events);
+
+        let mut pricing = HashMap::new();
+        pricing.insert(
+            ModelSlug::new("known/model"),
+            Pricing {
+                input_per_token: 0.0,
+                output_per_token: 0.0,
+                cache_read_per_token: 0.0,
+                cache_write_per_token: 0.0,
+                reasoning_per_token: None,
+            },
+        );
+
+        let unknown = unknown_model_slugs(&agg, &pricing);
+        let mut expected = HashSet::new();
+        expected.insert(ModelSlug::new("vendor/unknown-a"));
+        expected.insert(ModelSlug::new("vendor/unknown-b"));
+
+        assert_eq!(unknown, expected);
+        assert_eq!(unknown.len(), 2);
     }
 }
