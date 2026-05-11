@@ -292,8 +292,19 @@ struct TotalTokenUsage {
 
 fn token_counts_from_info(info: Option<TokenCountInfo>) -> Option<TokenCounts> {
     let total = info?.total_token_usage?;
+    // OpenAI's `total_token_usage.input_tokens` is the **inclusive** count
+    // (uncached + cached). `cached_input_tokens` is the subset that hit prompt
+    // cache. Subtract so `tokens.input` is the non-cached prompt size only;
+    // otherwise cache hits would be double-counted across `input` and
+    // `cache_read`. `saturating_sub` guards against any unexpected ordering
+    // where cached exceeds total (shouldn't happen, but we don't want to
+    // underflow if it does).
+    let input = total
+        .input_tokens
+        .unwrap_or(0)
+        .saturating_sub(total.cached_input_tokens.unwrap_or(0));
     Some(TokenCounts {
-        input: total.input_tokens.unwrap_or(0),
+        input,
         output: total.output_tokens.unwrap_or(0),
         cache_read: total.cached_input_tokens.unwrap_or(0),
         cache_write: 0,
@@ -717,6 +728,14 @@ mod tests {
             })
         });
 
+        // Fixture cumulative readings (input_tokens is inclusive of cached):
+        //   reading 1: input=100, cached=10  -> uncached=90,  cache_read=10
+        //   reading 2: input=150, cached=15  -> uncached=135, cache_read=15
+        //   reading 3: input=190, cached=20  -> uncached=170, cache_read=20
+        // Emitted deltas:
+        //   event 1: input=90,  cache_read=10, output=20, reasoning=5
+        //   event 2: input=45,  cache_read=5,  output=10, reasoning=1
+        //   event 3: input=35,  cache_read=5,  output=20, reasoning=2
         assert_eq!(events.len(), 3);
         assert_eq!(
             events,
@@ -728,7 +747,7 @@ mod tests {
                     provider: "openai".into(),
                     project: Some("/home/bob/src/reckon".into()),
                     tokens: TokenCounts {
-                        input: 100,
+                        input: 90,
                         output: 20,
                         cache_read: 10,
                         cache_write: 0,
@@ -745,7 +764,7 @@ mod tests {
                     provider: "openai".into(),
                     project: Some("/home/bob/src/reckon".into()),
                     tokens: TokenCounts {
-                        input: 50,
+                        input: 45,
                         output: 10,
                         cache_read: 5,
                         cache_write: 0,
@@ -762,7 +781,7 @@ mod tests {
                     provider: "openai".into(),
                     project: Some("/home/bob/src/reckon".into()),
                     tokens: TokenCounts {
-                        input: 40,
+                        input: 35,
                         output: 20,
                         cache_read: 5,
                         cache_write: 0,
@@ -805,6 +824,79 @@ mod tests {
         });
 
         assert!(events.is_empty());
+    }
+
+    /// Build a `token_count` event payload via `TokenCountInfo` so we exercise
+    /// the same path as the rollout parser without going through JSON.
+    fn make_info(input_tokens: u64, cached_input_tokens: u64) -> Option<TokenCountInfo> {
+        Some(TokenCountInfo {
+            total_token_usage: Some(TotalTokenUsage {
+                input_tokens: Some(input_tokens),
+                cached_input_tokens: Some(cached_input_tokens),
+                output_tokens: Some(0),
+                reasoning_output_tokens: Some(0),
+            }),
+        })
+    }
+
+    #[test]
+    fn token_counts_subtracts_cached_from_input() {
+        // OpenAI reports input_tokens inclusive of cached. We must subtract.
+        let counts = token_counts_from_info(make_info(1000, 800)).expect("counts");
+        assert_eq!(counts.input, 200, "input must be non-cached only");
+        assert_eq!(counts.cache_read, 800, "cache_read must equal cached_input_tokens");
+    }
+
+    #[test]
+    fn token_counts_saturates_when_cached_exceeds_input() {
+        // Pathological ordering — shouldn't happen, but we don't underflow.
+        let counts = token_counts_from_info(make_info(50, 100)).expect("counts");
+        assert_eq!(counts.input, 0);
+        assert_eq!(counts.cache_read, 100);
+    }
+
+    #[test]
+    fn cumulative_readings_emit_non_cached_delta() {
+        // Two cumulative token_count payloads:
+        //   reading 1: input=1000, cached=800  -> uncached=200, cache=800
+        //   reading 2: input=1500, cached=1100 -> uncached=400, cache=1100
+        // Expected emitted delta on reading 2:
+        //   tokens.input      = 400 - 200 = 200
+        //   tokens.cache_read = 1100 - 800 = 300
+        let mut state = CodexSessionState::default();
+        state.on_session_meta(SessionMetaPayload {
+            id: Some("session-cache".into()),
+            cwd: Some("/tmp/project".into()),
+            model_provider: Some("openai".into()),
+        });
+        state.on_turn_context(TurnContextPayload {
+            model: Some("gpt-5.2".into()),
+            cwd: None,
+        });
+
+        let reading1 = token_counts_from_info(make_info(1000, 800)).expect("reading 1");
+        assert_eq!(reading1.input, 200);
+        assert_eq!(reading1.cache_read, 800);
+        let event1 = state
+            .on_token_count(1_778_414_400, reading1)
+            .expect("first event");
+        assert_eq!(event1.tokens.input, 200, "first delta is the full reading");
+        assert_eq!(event1.tokens.cache_read, 800);
+
+        let reading2 = token_counts_from_info(make_info(1500, 1100)).expect("reading 2");
+        assert_eq!(reading2.input, 400);
+        assert_eq!(reading2.cache_read, 1100);
+        let event2 = state
+            .on_token_count(1_778_414_460, reading2)
+            .expect("second event");
+        assert_eq!(
+            event2.tokens.input, 200,
+            "delta of non-cached input across two readings (400 - 200)"
+        );
+        assert_eq!(
+            event2.tokens.cache_read, 300,
+            "delta of cached input across two readings (1100 - 800)"
+        );
     }
 
     proptest! {
