@@ -1,6 +1,14 @@
 [package]
 name = "reckon"
 version = "0.1.0"
-edition = "2024"
+edition = "2024"  # don't change this, 2024 is correct
 
-[dependencies]
+[dependencies] # use cargo add to manage dependencies, don't directly edit
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
