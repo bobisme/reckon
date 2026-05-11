@@ -674,7 +674,7 @@ mod tests {
         assert_eq!(events.len(), 3, "expected 3 events, got {}: {events:?}", events.len());
 
         let e0 = events.iter().find(|e| e.dedup_key == "session-001:msg_002").expect("msg_002");
-        assert_eq!(e0.model.as_str(), "claude-haiku-4-5");
+        assert_eq!(e0.model.as_str(), "anthropic/claude-haiku-4.5");
         assert_eq!(e0.tokens.input, 150);
         assert_eq!(e0.tokens.output, 45);
         assert_eq!(e0.tokens.cache_read, 0);
@@ -692,7 +692,7 @@ mod tests {
 
         let e2 = events.iter().find(|e| e.dedup_key == "session-001:msg_006").expect("msg_006");
         assert_eq!(e2.provider, "google");
-        assert_eq!(e2.model.as_str(), "gemini-2-pro");
+        assert_eq!(e2.model.as_str(), "google/gemini-2-pro");
     }
 
     #[test]
