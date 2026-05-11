@@ -464,7 +464,7 @@ mod tests {
 
         let first = &events[0];
         assert_eq!(first.dedup_key, "session-2026-02-19T22-09-ae63ca40.json:1");
-        assert_eq!(first.model.as_str(), "gemini-2.5-pro");
+        assert_eq!(first.model.as_str(), "google/gemini-2.5-pro");
         assert_eq!(first.provider, "google");
         assert_eq!(first.project, Some("/home/bob/src/manifold".into()));
         assert_eq!(first.tokens.input, 100);
@@ -475,7 +475,7 @@ mod tests {
 
         let second = &events[1];
         assert_eq!(second.dedup_key, "session-2026-02-19T22-09-ae63ca40.json:2");
-        assert_eq!(second.model.as_str(), "gemini-2.5-flash");
+        assert_eq!(second.model.as_str(), "google/gemini-2.5-flash");
         assert_eq!(second.tokens.input, 8);
         assert_eq!(second.tokens.output, 3);
         assert_eq!(second.tokens.cache_read, 1);
