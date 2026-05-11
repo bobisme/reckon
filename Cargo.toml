@@ -1,9 +1,15 @@
-[package]
-name = "reckon"
-version = "0.1.0"
-edition = "2024"  # don't change this, 2024 is correct
+[workspace]
+members = [
+    "crates/reckon-core",
+    "crates/reckon-readers",
+    "crates/reckon-cli",
+    "crates/xtask",
+]
+resolver = "3"
 
-[dependencies] # use cargo add to manage dependencies, don't directly edit
+[workspace.package]
+edition = "2024"
+license = "MIT"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

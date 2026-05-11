@@ -1,0 +1,10 @@
+[package]
+name = "reckon-readers"
+version = "0.1.0"
+edition.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+reckon-core = { path = "../reckon-core" }
