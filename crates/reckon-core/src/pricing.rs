@@ -40,6 +40,38 @@ pub fn load_pricing(path: &Path) -> HashMap<ModelSlug, Pricing> {
     load_pricing_from_str(&body)
 }
 
+/// Check if the pricing cache file is stale (older than 7 days or missing).
+#[must_use]
+pub fn is_pricing_cache_stale(path: &Path) -> bool {
+    match fs::metadata(path) {
+        Ok(metadata) => {
+            if let Ok(modified) = metadata.modified()
+                && let Ok(elapsed) = modified.elapsed()
+            {
+                return elapsed.as_secs() > 7 * 24 * 60 * 60;
+            }
+            false
+        }
+        Err(_) => true,
+    }
+}
+
+/// Load pricing from cache, merging with fallback (cached takes precedence).
+/// Returns None if the cache file doesn't exist; returns Some with cached+fallback if it does.
+#[must_use]
+pub fn load_pricing_from_cache(path: &Path) -> Option<HashMap<ModelSlug, Pricing>> {
+    if !path.exists() {
+        return None;
+    }
+
+    let cached = fs::read_to_string(path)
+        .map_or_else(|_| HashMap::new(), |body| load_pricing_from_str(&body));
+
+    let mut merged = load_pricing_fallback();
+    merged.extend(cached);
+    Some(merged)
+}
+
 #[must_use]
 pub fn load_pricing_fallback() -> HashMap<ModelSlug, Pricing> {
     load_pricing_from_str(include_str!("../assets/pricing-fallback.json"))
@@ -200,6 +232,8 @@ fn normalize_vendor(vendor: &str) -> &str {
 mod tests {
     use super::*;
     use std::path::Path;
+    use std::fs;
+    use std::time::SystemTime;
 
     fn fixture() -> HashMap<ModelSlug, Pricing> {
         load_pricing(
@@ -293,5 +327,71 @@ mod tests {
             format!("{}/{}", slug.vendor, slug.model),
             "anthropic/claude-opus-4-7"
         );
+    }
+
+    #[test]
+    fn missing_cache_file_is_stale() {
+        let path = Path::new("/tmp/nonexistent/pricing-test-missing-12345.json");
+        assert!(is_pricing_cache_stale(path));
+    }
+
+    #[test]
+    fn recent_cache_file_is_not_stale() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("pricing.json");
+        fs::write(&path, "{}").expect("write test file");
+        assert!(!is_pricing_cache_stale(&path));
+    }
+
+    #[test]
+    fn old_cache_file_is_stale() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("pricing.json");
+        fs::write(&path, "{}").expect("write test file");
+
+        let eight_days_ago = SystemTime::now()
+            - std::time::Duration::from_secs(8 * 24 * 60 * 60);
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(eight_days_ago))
+            .expect("set mtime");
+
+        assert!(is_pricing_cache_stale(&path));
+    }
+
+    #[test]
+    fn missing_cache_returns_none() {
+        let path = Path::new("/tmp/nonexistent/pricing-test-load-12345.json");
+        assert_eq!(load_pricing_from_cache(path), None);
+    }
+
+    #[test]
+    fn load_pricing_from_cache_merges_with_fallback() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("pricing.json");
+
+        let cached = r#"{"anthropic/claude-opus-4.7": {"input_cost_per_token": 0.01, "output_cost_per_token": 0.03}}"#;
+        fs::write(&path, cached).expect("write test file");
+
+        let merged = load_pricing_from_cache(&path).expect("load pricing");
+
+        assert!(merged.contains_key(&ModelSlug::new("anthropic/claude-opus-4.7")));
+        let fallback_pricing = load_pricing_fallback();
+        for (model, _) in fallback_pricing {
+            assert!(merged.contains_key(&model), "fallback model {model} not in merged pricing");
+        }
+    }
+
+    #[test]
+    fn cache_takes_precedence_over_fallback() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("pricing.json");
+
+        let cached = r#"{"anthropic/claude-opus-4.7": {"input_cost_per_token": 99.99, "output_cost_per_token": 88.88}}"#;
+        fs::write(&path, cached).expect("write test file");
+
+        let merged = load_pricing_from_cache(&path).expect("load pricing");
+        let model = ModelSlug::new("anthropic/claude-opus-4.7");
+        let price = merged.get(&model).expect("model not found");
+        assert_eq!(price.input_per_token, 99.99);
+        assert_eq!(price.output_per_token, 88.88);
     }
 }

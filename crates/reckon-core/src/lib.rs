@@ -3,7 +3,7 @@ pub mod model_map;
 pub mod pricing;
 
 pub use cache::open_cache;
-pub use pricing::{Pricing, cost, load_pricing, load_pricing_fallback};
+pub use pricing::{Pricing, cost, load_pricing, load_pricing_fallback, load_pricing_from_cache, is_pricing_cache_stale};
 
 use std::fmt;
 use std::ops::AddAssign;
