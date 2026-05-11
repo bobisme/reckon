@@ -13,6 +13,7 @@ pub fn canonical(source: Source, raw: &str, _provider: Option<&str>) -> ModelSlu
 fn claude_canonical(raw: &str) -> Option<ModelSlug> {
     let families: &[(&str, &str)] = &[
         ("claude-opus-4-7", "anthropic/claude-opus-4.7"),
+        ("claude-opus-4-6", "anthropic/claude-opus-4.6"),
         ("claude-sonnet-4-6", "anthropic/claude-sonnet-4.6"),
         ("claude-haiku-4-5", "anthropic/claude-haiku-4.5"),
     ];

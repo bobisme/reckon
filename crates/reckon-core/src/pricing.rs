@@ -37,13 +37,21 @@ struct CanonicalModelSlug {
 pub fn load_pricing(path: &Path) -> HashMap<ModelSlug, Pricing> {
     let body = fs::read_to_string(path)
         .unwrap_or_else(|error| panic!("failed to read pricing file {}: {error}", path.display()));
+    load_pricing_from_str(&body)
+}
 
-    let raw: HashMap<String, LiteLLMEntry> = serde_json::from_str(&body).unwrap_or_else(|error| {
-        panic!(
-            "failed to parse pricing JSON from {}: {error}",
-            path.display()
-        )
-    });
+#[must_use]
+pub fn load_pricing_fallback() -> HashMap<ModelSlug, Pricing> {
+    load_pricing_from_str(include_str!("../assets/pricing-fallback.json"))
+}
+
+/// # Panics
+///
+/// Panics if `body` is not valid `LiteLLM` pricing JSON.
+#[must_use]
+pub fn load_pricing_from_str(body: &str) -> HashMap<ModelSlug, Pricing> {
+    let raw: HashMap<String, LiteLLMEntry> =
+        serde_json::from_str(body).expect("failed to parse pricing JSON");
 
     let mut out = HashMap::new();
     for (raw_slug, entry) in raw {

@@ -1,14 +1,14 @@
 pub mod model_map;
 pub mod pricing;
 
-pub use pricing::{Pricing, cost, load_pricing};
+pub use pricing::{Pricing, cost, load_pricing, load_pricing_fallback};
 
 use std::fmt;
 use std::ops::AddAssign;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
     Claude,
@@ -32,7 +32,7 @@ impl fmt::Display for Source {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ModelSlug(pub String);
 
 impl ModelSlug {
