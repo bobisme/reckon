@@ -2235,6 +2235,10 @@ dependencies = [
 [[package]]
 name = "xtask"
 version = "0.1.0"
+dependencies = [
+ "minreq",
+ "serde_json",
+]
 
 [[package]]
 name = "zerocopy"

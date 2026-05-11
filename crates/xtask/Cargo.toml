@@ -7,3 +7,5 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
+serde_json = "1"
+minreq = { version = "2", features = ["https"] }
