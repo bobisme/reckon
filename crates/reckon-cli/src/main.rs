@@ -8,11 +8,26 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use asupersync::Cx;
+use clap::Parser;
 use reckon_core::{
     load_pricing_from_cache, load_pricing_fallback, is_pricing_cache_stale, ModelSlug,
 };
 use reckon_readers::claude::ClaudeReader;
 use reckon_readers::{run_readers_with_cache, Reader};
+
+#[derive(Parser)]
+#[command(name = "reckon")]
+#[command(about = "Monthly AI usage tracker with unsubsidized cost breakdown")]
+#[command(long_about = None)]
+struct Cli {
+    /// Disable automatic pricing refresh from LiteLLM
+    ///
+    /// When set, pricing loads from ~/.cache/reckon/pricing.json if present,
+    /// otherwise falls back to the vendored snapshot. No network requests are made.
+    /// Note: newer models may be priced at $0 if not in cache or fallback.
+    #[arg(long)]
+    offline: bool,
+}
 
 fn cache_path() -> PathBuf {
     let base = env::var("XDG_CACHE_HOME").map_or_else(
@@ -49,6 +64,7 @@ fn format_unknown_model_warning(models: &HashSet<ModelSlug>) -> String {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Cli::parse();
     let runtime = asupersync::runtime::RuntimeBuilder::new().build()?;
     let handle = runtime.handle();
     let join = handle.spawn(async move {
@@ -57,7 +73,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let pricing_path = pricing_cache_path();
         let pricing = load_pricing_from_cache(&pricing_path).unwrap_or_else(load_pricing_fallback);
 
-        if is_pricing_cache_stale(&pricing_path) {
+        if !args.offline && is_pricing_cache_stale(&pricing_path) {
             let path_for_fetch = pricing_path.clone();
             let _refresh_task = std::thread::spawn(move || {
                 if let Err(e) = pricing_refresh::fetch_and_cache_pricing(&path_for_fetch) {

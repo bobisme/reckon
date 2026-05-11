@@ -19,3 +19,4 @@ reckon-readers = { path = "../reckon-readers" }
 asupersync = { version = "0.2", features = ["tls", "tls-webpki-roots", "proc-macros"] }
 tabled = "0.18"
 minreq = { version = "2", features = ["https"] }
+clap = { version = "4", features = ["derive"] }
