@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod codex;
+pub mod pi;
 
 use std::fmt;
 use std::sync::{Arc, Mutex};
