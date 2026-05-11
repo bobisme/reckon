@@ -8,6 +8,7 @@ const CACHE_SCHEMA_VERSION: i32 = 1;
 /// # Panics
 ///
 /// Panics if the cache database cannot be opened, migrated, or configured.
+#[must_use]
 pub fn open_cache(path: &Path) -> Connection {
     if let Some(parent) = path
         .parent()
