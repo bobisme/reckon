@@ -11,8 +11,8 @@ use std::path::PathBuf;
 use asupersync::Cx;
 use clap::{Parser, ValueEnum};
 use reckon_core::{
-    load_pricing_from_cache, load_pricing_fallback, is_pricing_cache_stale, ModelSlug, Source,
-    YearMonth,
+    is_pricing_cache_stale, load_pricing_fallback, load_pricing_from_cache, resolve_tz, ModelSlug,
+    Source, YearMonth,
 };
 use reckon_readers::claude::ClaudeReader;
 use reckon_readers::codex::CodexReader;
@@ -80,10 +80,30 @@ struct Cli {
     /// End of date range, inclusive (YYYY-MM)
     #[arg(long)]
     until: Option<YearMonth>,
+
+    /// Time zone used for month bucketing.
+    ///
+    /// Accepts `local` (default; reads the system zone), `utc`, or any IANA
+    /// name (e.g., `America/New_York`). `local` matches ccusage's bucketing on
+    /// this machine; pass `utc` to reproduce reckon's pre-bn-wyu behavior.
+    #[arg(long, default_value = "local")]
+    tz: String,
 }
 
 fn parse_by_spec(s: &str) -> Result<BySpec, String> {
     BySpec::parse(s)
+}
+
+/// Re-bucket each event's `month` from its `timestamp_secs` under the active
+/// TZ. Events whose `timestamp_secs` is 0 (legacy cache rows persisted before
+/// schema v3) are left at their stored UTC month so they don't all collapse to
+/// 1970-01.
+fn rebucket_events(events: &mut [reckon_core::UsageEvent], tz: &jiff::tz::TimeZone) {
+    for event in events {
+        if event.timestamp_secs != 0 {
+            event.month = YearMonth::from_timestamp(event.timestamp_secs, tz);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -265,6 +285,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
+    let tz = match resolve_tz(&args.tz) {
+        Ok(tz) => tz,
+        Err(error) => {
+            eprintln!("error: {error}");
+            std::process::exit(1);
+        }
+    };
+
     let requested_sources = args.source.as_ref().map_or_else(
         || {
             let all_sources = [
@@ -339,6 +367,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         let mut events = run_readers_with_cache(&cx, readers, &cache_path()).await;
+
+        rebucket_events(&mut events, &tz);
 
         if let Some(ref filter) = month_filter {
             events.retain(|e| filter.matches(e.month));
@@ -560,5 +590,66 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("--since must be <= --until"));
+    }
+
+    fn synth_event(dedup: &str, ts_secs: i64) -> reckon_core::UsageEvent {
+        reckon_core::UsageEvent {
+            source: Source::Claude,
+            month: YearMonth::from_utc(ts_secs),
+            timestamp_secs: ts_secs,
+            model: ModelSlug::new("anthropic/claude-opus-4.7"),
+            provider: "anthropic".into(),
+            project: None,
+            tokens: reckon_core::TokenCounts {
+                input: 10,
+                output: 1,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            dedup_key: dedup.into(),
+            known_cost_usd: None,
+            byok_usage_inference: None,
+        }
+    }
+
+    /// Integration anchor for bn-wyu: a UTC May-1 03:00 event re-buckets to
+    /// April under America/Los_Angeles (UTC-7 PDT) and stays in May under
+    /// utc. Mirrors the user-visible smoke test in the bone description.
+    #[test]
+    fn rebucket_events_shifts_across_tz_boundary() {
+        let ts = 1_777_597_200_i64; // 2026-05-01T03:00:00Z
+        let mut events = vec![synth_event("evt-1", ts)];
+
+        let utc = resolve_tz("utc").expect("utc");
+        rebucket_events(&mut events, &utc);
+        assert_eq!(events[0].month, YearMonth::new(2026, 5));
+
+        let pacific = resolve_tz("America/Los_Angeles").expect("pacific");
+        rebucket_events(&mut events, &pacific);
+        assert_eq!(events[0].month, YearMonth::new(2026, 4));
+    }
+
+    #[test]
+    fn rebucket_events_leaves_legacy_rows_alone() {
+        let mut events = vec![reckon_core::UsageEvent {
+            source: Source::Claude,
+            month: YearMonth::new(2026, 5),
+            timestamp_secs: 0,
+            model: ModelSlug::new("anthropic/claude-opus-4.7"),
+            provider: "anthropic".into(),
+            project: None,
+            tokens: reckon_core::TokenCounts::default(),
+            dedup_key: "legacy".into(),
+            known_cost_usd: None,
+            byok_usage_inference: None,
+        }];
+
+        let pacific = resolve_tz("America/Los_Angeles").expect("pacific");
+        rebucket_events(&mut events, &pacific);
+
+        // Without timestamp_secs there is nothing to project. The pre-computed
+        // month must survive so legacy cache rows don't all collapse to 1970.
+        assert_eq!(events[0].month, YearMonth::new(2026, 5));
     }
 }

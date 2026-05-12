@@ -1,12 +1,14 @@
 pub mod cache;
 pub mod model_map;
 pub mod pricing;
+pub mod tz;
 
 pub use cache::open_cache;
 pub use pricing::{
     Pricing, cost, is_pricing_cache_stale, load_pricing, load_pricing_fallback,
     load_pricing_from_cache,
 };
+pub use tz::{TzResolveError, resolve_tz};
 
 use std::fmt;
 use std::ops::AddAssign;
@@ -97,6 +99,21 @@ impl YearMonth {
         }
     }
 
+    /// Bucket an epoch-seconds timestamp into a year/month using the supplied
+    /// IANA time zone. Falls back to UTC bucketing for timestamps that fail to
+    /// project (e.g., epoch values outside jiff's supported range).
+    #[must_use]
+    pub fn from_timestamp(ts_secs: i64, tz: &jiff::tz::TimeZone) -> Self {
+        let Ok(ts) = jiff::Timestamp::from_second(ts_secs) else {
+            return Self::from_utc(ts_secs);
+        };
+        let zdt = ts.to_zoned(tz.clone());
+        Self {
+            year: zdt.year().into(),
+            month: u8::try_from(zdt.month()).unwrap_or(1),
+        }
+    }
+
     #[must_use]
     pub const fn next(self) -> Self {
         if self.month == 12 {
@@ -184,6 +201,11 @@ impl AddAssign for TokenCounts {
 pub struct UsageEvent {
     pub source: Source,
     pub month: YearMonth,
+    /// Original event timestamp as epoch seconds. Carried alongside `month` so
+    /// the aggregator can re-bucket by the active timezone at display time
+    /// without re-reading source files.
+    #[serde(default)]
+    pub timestamp_secs: i64,
     pub model: ModelSlug,
     pub provider: String,
     pub project: Option<String>,
@@ -234,6 +256,7 @@ mod tests {
         let event = UsageEvent {
             source: Source::Claude,
             month: YearMonth::new(2026, 5),
+            timestamp_secs: 1_777_777_777,
             model: ModelSlug::new("anthropic/claude-opus-4.7"),
             provider: "anthropic".into(),
             project: Some("my-project".into()),
@@ -326,6 +349,26 @@ mod tests {
         assert!("2026-00".parse::<YearMonth>().is_err());
         assert!("2026-13".parse::<YearMonth>().is_err());
     }
+
+    /// Anchor for the whole bone: a UTC-May-1 03:00 timestamp lives in April
+    /// for US/Eastern (EDT = UTC-4) and in May for UTC.
+    #[test]
+    fn from_timestamp_shifts_month_across_tz_boundary() {
+        // 2026-05-01T03:00:00Z
+        let ts = 1_777_597_200_i64;
+        let utc = jiff::tz::TimeZone::UTC;
+        let nyc = jiff::tz::TimeZone::get("America/New_York").expect("nyc tz");
+        assert_eq!(YearMonth::from_timestamp(ts, &utc), YearMonth::new(2026, 5));
+        assert_eq!(YearMonth::from_timestamp(ts, &nyc), YearMonth::new(2026, 4));
+    }
+
+    #[test]
+    fn from_timestamp_matches_from_utc_when_tz_is_utc() {
+        let utc = jiff::tz::TimeZone::UTC;
+        for ts in [0_i64, 1, 1_767_225_600, 1_777_597_200] {
+            assert_eq!(YearMonth::from_timestamp(ts, &utc), YearMonth::from_utc(ts));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -370,6 +413,7 @@ mod proptest_roundtrip {
         fn usage_event_roundtrips(
             source in arb_source(),
             month in arb_yearmonth(),
+            timestamp_secs in any::<i64>(),
             model in "[a-z0-9/._-]{1,40}",
             provider in "[a-z]{1,20}",
             project in proptest::option::of("[a-z0-9_-]{1,30}"),
@@ -379,6 +423,7 @@ mod proptest_roundtrip {
             let event = UsageEvent {
                 source,
                 month,
+                timestamp_secs,
                 model: ModelSlug::new(model),
                 provider,
                 project,

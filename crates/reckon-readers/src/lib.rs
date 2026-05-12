@@ -336,8 +336,8 @@ pub(crate) fn read_jsonl_from_offset(path: &Path, start_offset: i64) -> io::Resu
 
 fn persist_events(conn: &mut Connection, events: &mut Vec<UsageEvent>) {
     let stmt = "INSERT OR REPLACE INTO events \
-        (source, dedup_key, month, model, provider, project, input, output, cache_read, cache_write, reasoning, known_cost_usd, byok_usage_inference) \
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)";
+        (source, dedup_key, month, timestamp_secs, model, provider, project, input, output, cache_read, cache_write, reasoning, known_cost_usd, byok_usage_inference) \
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)";
 
     for chunk in events.chunks(EVENT_BATCH_SIZE) {
         let tx = conn
@@ -350,6 +350,7 @@ fn persist_events(conn: &mut Connection, events: &mut Vec<UsageEvent>) {
                     event.source.to_string(),
                     event.dedup_key.as_str(),
                     event.month.to_string(),
+                    event.timestamp_secs,
                     event.model.as_str(),
                     event.provider.as_str(),
                     event.project.as_deref(),
@@ -414,7 +415,7 @@ fn load_source_files(conn: &Connection) -> HashMap<(Source, String), SourceFileS
 fn load_events(conn: &Connection) -> Vec<UsageEvent> {
     let mut stmt = conn
         .prepare(
-            "SELECT source, dedup_key, month, model, provider, project, \
+            "SELECT source, dedup_key, month, timestamp_secs, model, provider, project, \
              input, output, cache_read, cache_write, reasoning, \
              known_cost_usd, byok_usage_inference FROM events",
         )
@@ -436,20 +437,22 @@ fn load_events(conn: &Connection) -> Vec<UsageEvent> {
             let Ok(month) = YearMonth::from_str(&month) else {
                 return Ok(None);
             };
-            let model: String = row.get(3)?;
-            let provider: String = row.get(4)?;
-            let project: Option<String> = row.get(5)?;
-            let input: i64 = row.get(6)?;
-            let output: i64 = row.get(7)?;
-            let cache_read: i64 = row.get(8)?;
-            let cache_write: i64 = row.get(9)?;
-            let reasoning: i64 = row.get(10)?;
-            let known_cost_usd: Option<f64> = row.get(11)?;
-            let byok_usage_inference: Option<bool> = row.get(12)?;
+            let timestamp_secs: i64 = row.get(3)?;
+            let model: String = row.get(4)?;
+            let provider: String = row.get(5)?;
+            let project: Option<String> = row.get(6)?;
+            let input: i64 = row.get(7)?;
+            let output: i64 = row.get(8)?;
+            let cache_read: i64 = row.get(9)?;
+            let cache_write: i64 = row.get(10)?;
+            let reasoning: i64 = row.get(11)?;
+            let known_cost_usd: Option<f64> = row.get(12)?;
+            let byok_usage_inference: Option<bool> = row.get(13)?;
             let to_u64 = |v: i64| u64::try_from(v).unwrap_or(0);
             Ok(Some(UsageEvent {
                 source,
                 month,
+                timestamp_secs,
                 model: ModelSlug::new(model),
                 provider,
                 project,
@@ -700,6 +703,7 @@ mod tests {
         UsageEvent {
             source,
             month: YearMonth::new(2026, 5),
+            timestamp_secs: 1_777_777_777,
             model: ModelSlug::new(format!("model-{source}-{index}")),
             provider: source.to_string(),
             project: Some("test".into()),
@@ -1113,6 +1117,7 @@ mod tests {
                 let mut event = UsageEvent {
                     source: Source::OpenRouter,
                     month: YearMonth::new(2026, 5),
+                    timestamp_secs: 1_777_777_777,
                     model: ModelSlug::new("openrouter/test"),
                     provider: "openrouter".into(),
                     project: None,

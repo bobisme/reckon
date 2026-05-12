@@ -298,9 +298,11 @@ fn parse_legacy_message(path: &Path) -> Result<Option<UsageEvent>, ReaderError> 
         _ => None,
     };
 
+    let ts_secs = message.time.created / 1000;
     Ok(Some(UsageEvent {
         source: Source::OpenCode,
-        month: YearMonth::from_utc(message.time.created / 1000),
+        month: YearMonth::from_utc(ts_secs),
+        timestamp_secs: ts_secs,
         model: model_map::canonical(
             Source::OpenCode,
             &message.model_id,
@@ -391,13 +393,15 @@ impl OpenCodeReader {
                     continue;
                 }
 
-                let month = YearMonth::from_utc(row.created_ms / 1000);
+                let ts_secs = row.created_ms / 1000;
+                let month = YearMonth::from_utc(ts_secs);
                 let model =
                     model_map::canonical(Source::OpenCode, &row.model_id, Some(&row.provider_id));
 
                 let event = UsageEvent {
                     source: Source::OpenCode,
                     month,
+                    timestamp_secs: ts_secs,
                     model,
                     provider: row.provider_id,
                     project: row.project,

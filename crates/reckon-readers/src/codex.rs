@@ -226,6 +226,7 @@ impl CodexSessionState {
         Some(UsageEvent {
             source: Source::Codex,
             month: YearMonth::from_utc(timestamp_secs),
+            timestamp_secs,
             model: model_map::canonical(Source::Codex, raw_model, None),
             provider: self.provider.clone().unwrap_or_else(|| "openai".into()),
             project: self.project.clone(),
@@ -743,6 +744,7 @@ mod tests {
                 UsageEvent {
                     source: Source::Codex,
                     month: YearMonth::new(2026, 5),
+                    timestamp_secs: 1_778_414_402,
                     model: model_map::canonical(Source::Codex, "gpt-5.2", None),
                     provider: "openai".into(),
                     project: Some("/home/bob/src/reckon".into()),
@@ -760,6 +762,7 @@ mod tests {
                 UsageEvent {
                     source: Source::Codex,
                     month: YearMonth::new(2026, 5),
+                    timestamp_secs: 1_778_414_404,
                     model: model_map::canonical(Source::Codex, "gpt-5.2", None),
                     provider: "openai".into(),
                     project: Some("/home/bob/src/reckon".into()),
@@ -777,6 +780,7 @@ mod tests {
                 UsageEvent {
                     source: Source::Codex,
                     month: YearMonth::new(2026, 5),
+                    timestamp_secs: 1_778_414_406,
                     model: model_map::canonical(Source::Codex, "gpt-5.2-codex", None),
                     provider: "openai".into(),
                     project: Some("/home/bob/src/reckon".into()),

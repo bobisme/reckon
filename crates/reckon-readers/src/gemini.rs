@@ -252,6 +252,7 @@ async fn scan_session_file(
         let event = UsageEvent {
             source: Source::Gemini,
             month: YearMonth::from_utc(timestamp_secs),
+            timestamp_secs,
             model: model_map::canonical(Source::Gemini, raw_model, Some("google")),
             provider: "google".into(),
             project: project.clone(),

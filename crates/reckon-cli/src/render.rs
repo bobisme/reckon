@@ -413,6 +413,7 @@ mod tests {
             UsageEvent {
                 source: Source::Claude,
                 month: YearMonth::new(2026, 4),
+                timestamp_secs: 0,
                 model: ModelSlug::new("anthropic/claude-opus-4.7"),
                 provider: "anthropic".into(),
                 project: None,
@@ -424,6 +425,7 @@ mod tests {
             UsageEvent {
                 source: Source::Claude,
                 month: YearMonth::new(2026, 5),
+                timestamp_secs: 0,
                 model: ModelSlug::new("anthropic/claude-sonnet-4.6"),
                 provider: "anthropic".into(),
                 project: None,
@@ -435,6 +437,7 @@ mod tests {
             UsageEvent {
                 source: Source::Codex,
                 month: YearMonth::new(2026, 4),
+                timestamp_secs: 0,
                 model: ModelSlug::new("openai/codex-mini"),
                 provider: "openai".into(),
                 project: None,
@@ -446,6 +449,7 @@ mod tests {
             UsageEvent {
                 source: Source::Gemini,
                 month: YearMonth::new(2026, 5),
+                timestamp_secs: 0,
                 model: ModelSlug::new("google/gemini-2.5-pro"),
                 provider: "google".into(),
                 project: None,
@@ -457,6 +461,7 @@ mod tests {
             UsageEvent {
                 source: Source::Pi,
                 month: YearMonth::new(2026, 4),
+                timestamp_secs: 0,
                 model: ModelSlug::new("anthropic/claude-sonnet-4.6"),
                 provider: "anthropic".into(),
                 project: None,
@@ -468,6 +473,7 @@ mod tests {
             UsageEvent {
                 source: Source::OpenCode,
                 month: YearMonth::new(2026, 5),
+                timestamp_secs: 0,
                 model: ModelSlug::new("anthropic/claude-sonnet-4.6"),
                 provider: "anthropic".into(),
                 project: None,
@@ -479,6 +485,7 @@ mod tests {
             UsageEvent {
                 source: Source::OpenRouter,
                 month: YearMonth::new(2026, 5),
+                timestamp_secs: 0,
                 model: ModelSlug::new("anthropic/claude-opus-4.7"),
                 provider: "anthropic".into(),
                 project: None,

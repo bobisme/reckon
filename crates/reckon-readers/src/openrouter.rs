@@ -467,9 +467,18 @@ struct ActivityRow {
 
 impl ActivityRow {
     fn into_usage_event(self, date: UtcDate) -> UsageEvent {
+        // OpenRouter activity is reported with day-level granularity; we
+        // anchor each row at noon UTC of the reported date. With day-level
+        // granularity it's impossible to retroactively decide whether an
+        // event "really" belonged to the previous day in some other zone, so
+        // bucketing under any TZ falls back to the noon-UTC midpoint. This is
+        // good enough — OpenRouter dollar amounts are reconciled via
+        // `known_cost_usd` regardless.
+        let timestamp_secs = date.days_since_epoch * 86_400 + 12 * 3_600;
         UsageEvent {
             source: Source::OpenRouter,
             month: date.year_month(),
+            timestamp_secs,
             model: ModelSlug::new(self.model),
             provider: self.provider_name,
             project: None,

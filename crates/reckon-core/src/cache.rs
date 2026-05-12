@@ -3,7 +3,7 @@ use std::path::Path;
 
 use rusqlite::{Connection, Result};
 
-const CACHE_SCHEMA_VERSION: i32 = 2;
+const CACHE_SCHEMA_VERSION: i32 = 3;
 
 /// # Panics
 ///
@@ -48,50 +48,33 @@ fn apply_wal_and_schema(conn: &Connection) {
 
     match current {
         0 => {
-            conn.execute_batch(
-                "
-                CREATE TABLE IF NOT EXISTS source_files (
-                    source TEXT NOT NULL,
-                    path TEXT NOT NULL,
-                    mtime_ns INTEGER NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    last_offset INTEGER NOT NULL,
-                    PRIMARY KEY (source, path)
-                );
-
-                CREATE TABLE IF NOT EXISTS events (
-                    source TEXT NOT NULL,
-                    dedup_key TEXT NOT NULL,
-                    month TEXT NOT NULL,
-                    model TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    project TEXT,
-                    input INTEGER NOT NULL DEFAULT 0,
-                    output INTEGER NOT NULL DEFAULT 0,
-                    cache_read INTEGER NOT NULL DEFAULT 0,
-                    cache_write INTEGER NOT NULL DEFAULT 0,
-                    reasoning INTEGER NOT NULL DEFAULT 0,
-                    known_cost_usd REAL,
-                    byok_usage_inference INTEGER,
-                    PRIMARY KEY (source, dedup_key)
-                );
-
-                CREATE INDEX IF NOT EXISTS events_month ON events(month);
-                ",
-            )
-            .unwrap_or_else(|error| panic!("failed to create cache schema: {error}"));
-
-            conn.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)
-                .expect("failed to set cache schema version");
+            create_schema_v3(conn);
         }
         1 => {
+            // v1 -> v2 added known_cost_usd / byok_usage_inference.
+            // v2 -> v3 adds timestamp_secs.
             conn.execute_batch(
                 "
                 ALTER TABLE events ADD COLUMN known_cost_usd REAL;
                 ALTER TABLE events ADD COLUMN byok_usage_inference INTEGER;
+                ALTER TABLE events ADD COLUMN timestamp_secs INTEGER NOT NULL DEFAULT 0;
                 ",
             )
-            .unwrap_or_else(|error| panic!("failed to migrate cache schema to v2: {error}"));
+            .unwrap_or_else(|error| panic!("failed to migrate cache schema to v3: {error}"));
+
+            conn.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)
+                .expect("failed to set cache schema version");
+        }
+        2 => {
+            // v2 -> v3: add timestamp_secs. Existing rows default to 0, which
+            // would re-bucket everything to 1970-01 if we trusted it for
+            // display. Callers must therefore prefer the legacy `month` column
+            // when `timestamp_secs` is 0. The CLI's TZ re-bucketing pass
+            // implements that fallback. See report.rs `bucket_month_with_tz`.
+            conn.execute_batch(
+                "ALTER TABLE events ADD COLUMN timestamp_secs INTEGER NOT NULL DEFAULT 0;",
+            )
+            .unwrap_or_else(|error| panic!("failed to migrate cache schema to v3: {error}"));
 
             conn.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)
                 .expect("failed to set cache schema version");
@@ -100,6 +83,45 @@ fn apply_wal_and_schema(conn: &Connection) {
             panic!("unsupported cache schema version: {other}");
         }
     }
+}
+
+fn create_schema_v3(conn: &Connection) {
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS source_files (
+            source TEXT NOT NULL,
+            path TEXT NOT NULL,
+            mtime_ns INTEGER NOT NULL,
+            size_bytes INTEGER NOT NULL,
+            last_offset INTEGER NOT NULL,
+            PRIMARY KEY (source, path)
+        );
+
+        CREATE TABLE IF NOT EXISTS events (
+            source TEXT NOT NULL,
+            dedup_key TEXT NOT NULL,
+            month TEXT NOT NULL,
+            timestamp_secs INTEGER NOT NULL DEFAULT 0,
+            model TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            project TEXT,
+            input INTEGER NOT NULL DEFAULT 0,
+            output INTEGER NOT NULL DEFAULT 0,
+            cache_read INTEGER NOT NULL DEFAULT 0,
+            cache_write INTEGER NOT NULL DEFAULT 0,
+            reasoning INTEGER NOT NULL DEFAULT 0,
+            known_cost_usd REAL,
+            byok_usage_inference INTEGER,
+            PRIMARY KEY (source, dedup_key)
+        );
+
+        CREATE INDEX IF NOT EXISTS events_month ON events(month);
+        ",
+    )
+    .unwrap_or_else(|error| panic!("failed to create cache schema: {error}"));
+
+    conn.pragma_update(None, "user_version", CACHE_SCHEMA_VERSION)
+        .expect("failed to set cache schema version");
 }
 
 fn current_user_version(conn: &Connection) -> Result<i32> {

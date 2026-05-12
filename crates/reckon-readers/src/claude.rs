@@ -207,6 +207,7 @@ async fn scan_jsonl_file(
         let event = UsageEvent {
             source: Source::Claude,
             month: YearMonth::from_utc(ts_secs),
+            timestamp_secs: ts_secs,
             model,
             provider: "anthropic".into(),
             project: Some(project.into()),

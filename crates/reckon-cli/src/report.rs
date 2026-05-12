@@ -120,6 +120,7 @@ mod tests {
         UsageEvent {
             source,
             month: YearMonth::new(2026, month),
+            timestamp_secs: 0,
             model: ModelSlug::new(model),
             provider: "test".into(),
             project: None,

@@ -464,6 +464,7 @@ async fn scan_pi_session_file(
         let event = UsageEvent {
             source: Source::Pi,
             month: YearMonth::from_utc(timestamp_secs),
+            timestamp_secs,
             model: canonical_model,
             provider,
             project: Some(tuple.cwd.clone()),
