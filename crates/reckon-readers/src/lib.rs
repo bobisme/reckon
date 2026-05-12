@@ -281,6 +281,42 @@ pub(crate) fn read_jsonl_prefix(path: &Path, end_offset: i64) -> io::Result<Stri
     String::from_utf8(bytes).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
 }
 
+/// Parse an ISO 8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SS[.fff]Z`) into epoch
+/// seconds. Fractional seconds and timezone suffix are ignored — callers that
+/// need sub-second resolution must do their own parsing.
+pub(crate) fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
+    if s.len() < 19 {
+        return None;
+    }
+    let year: i32 = s.get(0..4)?.parse().ok()?;
+    let month: u32 = s.get(5..7)?.parse().ok()?;
+    let day: u32 = s.get(8..10)?.parse().ok()?;
+    let hour: u32 = s.get(11..13)?.parse().ok()?;
+    let min: u32 = s.get(14..16)?.parse().ok()?;
+    let sec: u32 = s.get(17..19)?.parse().ok()?;
+
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+
+    Some(civil_to_epoch(year, month, day, hour, min, sec))
+}
+
+#[expect(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
+pub(crate) fn civil_to_epoch(y: i32, m: u32, d: u32, h: u32, min: u32, sec: u32) -> i64 {
+    let (y, m) = if m <= 2 {
+        (i64::from(y) - 1, m + 9)
+    } else {
+        (i64::from(y), m - 3)
+    };
+    let era = (if y >= 0 { y } else { y - 399 }) / 400;
+    let yoe = (y - era * 400) as u64;
+    let doy = (153 * u64::from(m) + 2) / 5 + u64::from(d) - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146_097 + doe as i64 - 719_468;
+    days * 86_400 + i64::from(h) * 3_600 + i64::from(min) * 60 + i64::from(sec)
+}
+
 pub(crate) fn read_jsonl_from_offset(path: &Path, start_offset: i64) -> io::Result<String> {
     #[cfg(test)]
     JSONL_OPEN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);

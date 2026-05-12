@@ -9,8 +9,8 @@ use reckon_core::{Source, TokenCounts, UsageEvent, YearMonth};
 use serde::Deserialize;
 
 use crate::{
-    CacheStrategy, JsonlScanPlan, Reader, ReaderError, Sink, SinkError, plan_jsonl_scan,
-    read_jsonl_from_offset,
+    CacheStrategy, JsonlScanPlan, Reader, ReaderError, Sink, SinkError, parse_iso8601_to_epoch,
+    plan_jsonl_scan, read_jsonl_from_offset,
 };
 
 pub struct ClaudeReader {
@@ -239,39 +239,6 @@ fn file_modified_nanos(modified: SystemTime) -> Result<i64, io::Error> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "mtime too large for i64"))
 }
 
-fn parse_iso8601_to_epoch(s: &str) -> Option<i64> {
-    if s.len() < 19 {
-        return None;
-    }
-    let year: i32 = s.get(0..4)?.parse().ok()?;
-    let month: u32 = s.get(5..7)?.parse().ok()?;
-    let day: u32 = s.get(8..10)?.parse().ok()?;
-    let hour: u32 = s.get(11..13)?.parse().ok()?;
-    let min: u32 = s.get(14..16)?.parse().ok()?;
-    let sec: u32 = s.get(17..19)?.parse().ok()?;
-
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-
-    Some(civil_to_epoch(year, month, day, hour, min, sec))
-}
-
-#[expect(clippy::cast_sign_loss, clippy::cast_possible_wrap)]
-fn civil_to_epoch(y: i32, m: u32, d: u32, h: u32, min: u32, sec: u32) -> i64 {
-    let (y, m) = if m <= 2 {
-        (i64::from(y) - 1, m + 9)
-    } else {
-        (i64::from(y), m - 3)
-    };
-    let era = (if y >= 0 { y } else { y - 399 }) / 400;
-    let yoe = (y - era * 400) as u64;
-    let doy = (153 * u64::from(m) + 2) / 5 + u64::from(d) - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe as i64 - 719_468;
-    days * 86_400 + i64::from(h) * 3_600 + i64::from(min) * 60 + i64::from(sec)
-}
-
 #[derive(Deserialize)]
 struct JsonlEntry {
     r#type: String,
@@ -307,7 +274,10 @@ mod tests {
     use reckon_core::open_cache;
 
     use super::*;
-    use crate::{jsonl_open_count, reset_jsonl_open_count, run_readers, run_readers_with_cache};
+    use crate::{
+        civil_to_epoch, jsonl_open_count, parse_iso8601_to_epoch, reset_jsonl_open_count,
+        run_readers, run_readers_with_cache,
+    };
     use tempfile::TempDir;
 
     #[test]

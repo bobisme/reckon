@@ -14,8 +14,8 @@ use rusqlite::{Connection, OpenFlags};
 use serde::Deserialize;
 
 use crate::{
-    CacheStrategy, JsonlScanPlan, Reader, ReaderError, Sink, SinkError, plan_jsonl_scan,
-    read_jsonl_from_offset,
+    CacheStrategy, JsonlScanPlan, Reader, ReaderError, Sink, SinkError, parse_iso8601_to_epoch,
+    plan_jsonl_scan, read_jsonl_from_offset,
 };
 
 /// Tuple describing one Pi session file to parse.
@@ -326,13 +326,13 @@ enum ScanError {
 #[derive(Deserialize)]
 struct PiJsonlLine {
     r#type: String,
+    id: Option<String>,
+    timestamp: Option<String>,
     message: Option<PiMessage>,
 }
 
 #[derive(Deserialize)]
 struct PiMessage {
-    id: Option<String>,
-    timestamp: Option<i64>,
     role: Option<String>,
     provider: Option<String>,
     model: Option<String>,
@@ -348,9 +348,14 @@ struct PiUsage {
     cache_read: Option<u64>,
     #[serde(rename = "cacheWrite")]
     cache_write: Option<u64>,
+    // `cost` may be either a scalar f64 OR a nested object like
+    // `{"input":..., "output":..., "cacheWrite":..., "total":...}`
+    // (modern Pi sessions ship the object form). We don't consume the
+    // field — cost is computed downstream from tokens — but we still
+    // need to **accept any shape** or the whole line fails to parse.
     #[serde(default)]
     #[allow(dead_code)]
-    cost: Option<f64>,
+    cost: Option<serde_json::Value>,
 }
 
 fn indexed_mtime_ns(tuple: &PiSessionTuple) -> Option<i64> {
@@ -429,6 +434,16 @@ async fn scan_pi_session_file(
             continue;
         }
 
+        let Some(message_id) = entry.id else {
+            continue;
+        };
+        let Some(timestamp_str) = entry.timestamp else {
+            continue;
+        };
+        let Some(timestamp_secs) = parse_iso8601_to_epoch(&timestamp_str) else {
+            continue;
+        };
+
         let Some(message) = entry.message else {
             continue;
         };
@@ -439,18 +454,10 @@ async fn scan_pi_session_file(
         }
 
         let Some(usage) = message.usage else { continue };
-        let Some(message_id) = message.id else {
-            continue;
-        };
-        let Some(timestamp_ms) = message.timestamp else {
-            continue;
-        };
         let Some(provider) = message.provider else {
             continue;
         };
         let Some(model) = message.model else { continue };
-
-        let timestamp_secs = timestamp_ms / 1000;
 
         let canonical_model = model_map::canonical(Source::Pi, &model, Some(&provider));
 
@@ -854,7 +861,7 @@ mod tests {
         fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
         fs::write(
             &session_path,
-            r#"{"type":"message","message":{"id":"msg_001","timestamp":1715420427091,"role":"user","provider":"anthropic","model":"claude-haiku-4-5","content":"Hello"}}
+            r#"{"type":"message","id":"msg_001","timestamp":"2026-05-11T18:30:27.091Z","message":{"role":"user","provider":"anthropic","model":"claude-haiku-4-5","content":"Hello"}}
 "#,
         )
         .expect("write fixture");
@@ -951,5 +958,66 @@ mod tests {
         });
 
         assert!(events.is_empty());
+    }
+
+    /// Verifies the **real** on-disk Pi jsonl format: `id` and `timestamp`
+    /// live at the **top level** of each record (not inside `message`), and
+    /// `timestamp` is an ISO 8601 string. Mirrors a sanitized record from
+    /// `~/.pi/agent/sessions/.../*.jsonl` as captured in bn-3ho.
+    #[test]
+    fn top_level_id_and_iso_timestamp_are_parsed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pi_root = tmp.path().join(".pi");
+        let sessions_dir = pi_root.join("agent").join("sessions");
+        let session_path = sessions_dir
+            .join("--home-bob-src-real")
+            .join("real.jsonl");
+        fs::create_dir_all(session_path.parent().expect("parent")).expect("create dirs");
+        // NOTE: the real Pi `usage.cost` field is an **object** (per-stream
+        // breakdown), not a scalar. Include it here so we catch regressions
+        // where serde tries to deserialize it as f64 and silently drops the line.
+        fs::write(
+            &session_path,
+            "\
+{\"type\":\"message\",\"id\":\"d2d38003\",\"parentId\":\"d199f96d\",\"timestamp\":\"2026-03-16T04:14:21.321Z\",\"message\":{\"role\":\"assistant\",\"content\":[],\"api\":\"anthropic-messages\",\"provider\":\"anthropic\",\"model\":\"claude-haiku-4-5\",\"usage\":{\"input\":10,\"output\":234,\"cacheRead\":0,\"cacheWrite\":4864,\"totalTokens\":5108,\"cost\":{\"input\":0.00001,\"output\":0.00117,\"cacheRead\":0,\"cacheWrite\":0.00608,\"total\":0.00726}}}}
+",
+        )
+        .expect("write fixture");
+
+        let db_path = sessions_dir.join("session-index.sqlite");
+        create_session_db(
+            &db_path,
+            [(
+                "--home-bob-src-real/real.jsonl",
+                "session-real",
+                "home/bob/src/real",
+                1000,
+                1000,
+            )],
+        );
+
+        let reader = PiReader::with_root(pi_root);
+
+        let events: Vec<UsageEvent> = run_on_lab(101, move |cx| {
+            Box::pin(async move { run_readers(&cx, vec![Box::new(reader)]).await })
+        });
+
+        assert_eq!(events.len(), 1, "expected 1 event, got: {events:?}");
+        let event = &events[0];
+        // session_id comes from the SQLite index when present and newer than
+        // all jsonl files; otherwise it's the jsonl file stem. Either is fine
+        // here — the load-bearing piece is the **top-level** id after the colon.
+        assert!(
+            event.dedup_key.ends_with(":d2d38003"),
+            "dedup_key should embed top-level id, got: {}",
+            event.dedup_key
+        );
+        assert_eq!(event.provider, "anthropic");
+        assert_eq!(event.model.as_str(), "anthropic/claude-haiku-4.5");
+        assert_eq!(event.tokens.input, 10);
+        assert_eq!(event.tokens.output, 234);
+        assert_eq!(event.tokens.cache_read, 0);
+        assert_eq!(event.tokens.cache_write, 4864);
+        assert_eq!(event.month, YearMonth::new(2026, 3));
     }
 }
