@@ -88,6 +88,11 @@ struct Cli {
     /// this machine; pass `utc` to reproduce reckon's pre-bn-wyu behavior.
     #[arg(long, default_value = "local")]
     tz: String,
+
+    /// Show every per-category token column (In, Out, Cache Wr, Cache Rd,
+    /// Reasoning). Default hides them and shows only the Total column.
+    #[arg(long)]
+    all_columns: bool,
 }
 
 fn parse_by_spec(s: &str) -> Result<BySpec, String> {
@@ -386,7 +391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if args.json {
             render::print_json(&events, &pricing, balance.as_ref(), &args.by);
         } else {
-            render::print_table(&aggregated, &pricing, balance.as_ref(), use_color, &args.by);
+            render::print_table(&aggregated, &pricing, balance.as_ref(), use_color, &args.by, args.all_columns);
         }
 
         if !unknown_models.is_empty() {

@@ -14,6 +14,7 @@ const ANSI_COLOR_RESET: &str = "\x1b[0m";
 const ANSI_BLUE: &str = "\x1b[36m";
 const ANSI_GREEN: &str = "\x1b[32m";
 const ANSI_BOLD: &str = "\x1b[1m";
+const ANSI_DIM: &str = "\x1b[2m";
 
 fn colorize(text: &str, ansi_code: &str, enabled: bool) -> String {
     if enabled {
@@ -33,12 +34,55 @@ fn emphasize(text: String, use_color: bool) -> String {
     }
 }
 
+/// Wraps text in dim ANSI when `use_color` is true; otherwise returns as-is.
+fn dim(text: String, use_color: bool) -> String {
+    if use_color {
+        format!("{ANSI_DIM}{text}{ANSI_COLOR_RESET}")
+    } else {
+        text
+    }
+}
+
+/// Post-process the rendered table to dim box-drawing separators.
+///
+/// `tabled` writes borders with Unicode box-drawing chars (U+2500..=U+257F).
+/// For any line that's entirely separator (box-drawing chars + spaces), we
+/// dim the whole line. For data lines, we dim each `│` vertical separator
+/// in place. Cell contents keep their own ANSI (or no ANSI).
+fn dim_table_lines(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 64);
+    for (i, line) in s.lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        if !line.is_empty()
+            && line.chars().all(|c| (0x2500..=0x257F).contains(&u32::from(c)) || c == ' ')
+        {
+            out.push_str(ANSI_DIM);
+            out.push_str(line);
+            out.push_str(ANSI_COLOR_RESET);
+        } else {
+            for ch in line.chars() {
+                if ch == '│' {
+                    out.push_str(ANSI_DIM);
+                    out.push(ch);
+                    out.push_str(ANSI_COLOR_RESET);
+                } else {
+                    out.push(ch);
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn format_table(
     aggregated: &BTreeMap<AggregateKey, TokenCounts>,
     pricing: &HashMap<ModelSlug, Pricing>,
     balance: Option<&OpenRouterSummary>,
     by: &BySpec,
     use_color: bool,
+    all_columns: bool,
 ) -> String {
     let totals = month_totals(aggregated);
     let months: Vec<YearMonth> = totals.keys().copied().collect();
@@ -58,7 +102,11 @@ pub fn format_table(
     }
     let num_dim_cols = header.len() - 1;
     let token_col_start = header.len();
-    header.extend(["In", "Out", "Cache Wr", "Cache Rd", "Reasoning", "Cost"].map(String::from));
+    if all_columns {
+        header.extend(["In", "Out", "Cache Wr", "Cache Rd", "Reasoning"].map(String::from));
+    }
+    header.push("Total".into());
+    header.push("Cost".into());
     let total_cols = header.len();
 
     let mut builder = Builder::default();
@@ -77,7 +125,7 @@ pub fn format_table(
                 .as_ref()
                 .and_then(|m| pricing.get(m))
                 .map_or(0.0, |p| cost(tokens, p));
-            builder.push_record(build_data_row(by, *month, key, tokens, model_cost));
+            builder.push_record(build_data_row(by, *month, key, tokens, model_cost, use_color, all_columns));
         }
 
         let total_tokens = &totals[month];
@@ -96,18 +144,19 @@ pub fn format_table(
             total_tokens,
             total_cost,
             use_color,
+            all_columns,
         ));
     }
 
     let mut table = builder.build();
-    // psql style gives us a clean header underline (`-+-+-...`) which solves
-    // the "header blends with data" complaint without going full box-drawing.
-    table.with(Style::psql());
+    // Modern style uses box-drawing glyphs (┌─┐│└─┘├┤┬┴┼) for a cleaner look.
+    table.with(Style::modern());
     for col in token_col_start..total_cols {
         table.modify(Columns::single(col), Alignment::right());
     }
 
-    let mut out = table.to_string();
+    let rendered = table.to_string();
+    let mut out = if use_color { dim_table_lines(&rendered) } else { rendered };
     if let Some(summary) = balance {
         out.push('\n');
         out.push_str(&fmt_balance(summary));
@@ -121,11 +170,12 @@ pub fn print_table(
     balance: Option<&OpenRouterSummary>,
     use_color: bool,
     by: &BySpec,
+    all_columns: bool,
 ) {
     // Color is now applied per-cell inside format_table (TOTAL rows only),
     // not as an outer wrap. Print the table verbatim and colorize the
     // balance line separately so it keeps its own (green) accent.
-    let table_str = format_table(aggregated, pricing, None, by, use_color);
+    let table_str = format_table(aggregated, pricing, None, by, use_color, all_columns);
     println!("{table_str}");
     if let Some(summary) = balance {
         println!(
@@ -135,14 +185,24 @@ pub fn print_table(
     }
 }
 
+fn token_total(tokens: &TokenCounts) -> u64 {
+    tokens.input
+        .saturating_add(tokens.output)
+        .saturating_add(tokens.cache_read)
+        .saturating_add(tokens.cache_write)
+        .saturating_add(tokens.reasoning)
+}
+
 fn build_data_row(
     by: &BySpec,
     month: YearMonth,
     key: &AggregateKey,
     tokens: &TokenCounts,
     cost_usd: f64,
+    use_color: bool,
+    all_columns: bool,
 ) -> Vec<String> {
-    let mut row = vec![month.to_string()];
+    let mut row = vec![dim(month.to_string(), use_color)];
     if by.has(&Dimension::Source) {
         row.push(key.source.as_ref().map_or_else(String::new, ToString::to_string));
     }
@@ -155,11 +215,14 @@ fn build_data_row(
     if by.has(&Dimension::Project) {
         row.push(key.project.as_deref().unwrap_or("").to_string());
     }
-    row.push(fmt_thousands(tokens.input));
-    row.push(fmt_thousands(tokens.output));
-    row.push(fmt_thousands(tokens.cache_write));
-    row.push(fmt_thousands(tokens.cache_read));
-    row.push(fmt_thousands(tokens.reasoning));
+    if all_columns {
+        row.push(fmt_thousands(tokens.input));
+        row.push(fmt_thousands(tokens.output));
+        row.push(fmt_thousands(tokens.cache_write));
+        row.push(fmt_thousands(tokens.cache_read));
+        row.push(fmt_thousands(tokens.reasoning));
+    }
+    row.push(fmt_thousands(token_total(tokens)));
     row.push(fmt_cost(cost_usd));
     row
 }
@@ -170,17 +233,21 @@ fn build_total_row(
     tokens: &TokenCounts,
     cost_usd: f64,
     use_color: bool,
+    all_columns: bool,
 ) -> Vec<String> {
     let mut row = vec![emphasize(month.to_string(), use_color)];
     for i in 0..num_dim_cols {
         let cell = if i == 0 { "TOTAL".into() } else { String::new() };
         row.push(emphasize(cell, use_color));
     }
-    row.push(emphasize(fmt_thousands(tokens.input), use_color));
-    row.push(emphasize(fmt_thousands(tokens.output), use_color));
-    row.push(emphasize(fmt_thousands(tokens.cache_write), use_color));
-    row.push(emphasize(fmt_thousands(tokens.cache_read), use_color));
-    row.push(emphasize(fmt_thousands(tokens.reasoning), use_color));
+    if all_columns {
+        row.push(emphasize(fmt_thousands(tokens.input), use_color));
+        row.push(emphasize(fmt_thousands(tokens.output), use_color));
+        row.push(emphasize(fmt_thousands(tokens.cache_write), use_color));
+        row.push(emphasize(fmt_thousands(tokens.cache_read), use_color));
+        row.push(emphasize(fmt_thousands(tokens.reasoning), use_color));
+    }
+    row.push(emphasize(fmt_thousands(token_total(tokens)), use_color));
     row.push(emphasize(fmt_cost(cost_usd), use_color));
     row
 }
@@ -529,7 +596,7 @@ mod tests {
         let pricing = fixture_pricing();
         let by = BySpec::default();
         let aggregated = aggregate(&events, &by);
-        let out = format_table(&aggregated, &pricing, None, &by, false);
+        let out = format_table(&aggregated, &pricing, None, &by, false, false);
         insta::assert_snapshot!(out);
     }
 
@@ -544,7 +611,7 @@ mod tests {
             total_usage: 25.50,
             fetched_at: "2026-05-11T12:00:00Z".into(),
         };
-        let out = format_table(&aggregated, &pricing, Some(&balance), &by, false);
+        let out = format_table(&aggregated, &pricing, Some(&balance), &by, false, false);
         insta::assert_snapshot!(out);
     }
 
@@ -554,8 +621,39 @@ mod tests {
         let pricing = fixture_pricing();
         let by = BySpec::parse("source").expect("valid");
         let aggregated = aggregate(&events, &by);
-        let out = format_table(&aggregated, &pricing, None, &by, false);
+        let out = format_table(&aggregated, &pricing, None, &by, false, false);
         insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn snapshot_table_all_columns() {
+        let events = fixture_events();
+        let pricing = fixture_pricing();
+        let by = BySpec::default();
+        let aggregated = aggregate(&events, &by);
+        let out = format_table(&aggregated, &pricing, None, &by, false, true);
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn dim_table_lines_dims_separators() {
+        // Header underline ('━' run with no cell content) gets fully dimmed.
+        let input = "┌────┬────┐\n│ a  │ b  │\n└────┴────┘";
+        let out = dim_table_lines(input);
+        assert!(out.starts_with("\x1b[2m┌"), "border line should be dimmed");
+        assert!(out.contains("\x1b[2m│\x1b[0m a  \x1b[2m│\x1b[0m"), "inner │ should be dimmed in-place: {out}");
+    }
+
+    #[test]
+    fn token_total_sums_all_buckets() {
+        let t = TokenCounts {
+            input: 100,
+            output: 50,
+            cache_read: 200,
+            cache_write: 10,
+            reasoning: 5,
+        };
+        assert_eq!(token_total(&t), 365);
     }
 
     #[test]
