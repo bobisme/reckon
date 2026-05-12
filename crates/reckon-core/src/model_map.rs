@@ -26,11 +26,16 @@ pub fn canonical(source: Source, raw: &str, provider: Option<&str>) -> ModelSlug
     ModelSlug(raw.into())
 }
 
-fn claude_canonical(raw: &str) -> Option<ModelSlug> {
+pub(crate) fn claude_canonical(raw: &str) -> Option<ModelSlug> {
+    // Order matters: longer prefixes must come first because matching uses
+    // `starts_with`. The 4-5 families don't share a prefix with 4-6/4-7, so
+    // order between major versions doesn't collide.
     let families: &[(&str, &str)] = &[
         ("claude-opus-4-7", "anthropic/claude-opus-4.7"),
         ("claude-opus-4-6", "anthropic/claude-opus-4.6"),
+        ("claude-opus-4-5", "anthropic/claude-opus-4.5"),
         ("claude-sonnet-4-6", "anthropic/claude-sonnet-4.6"),
+        ("claude-sonnet-4-5", "anthropic/claude-sonnet-4.5"),
         ("claude-haiku-4-5", "anthropic/claude-haiku-4.5"),
     ];
     for &(prefix, canonical) in families {
@@ -99,15 +104,43 @@ fn gemini_canonical(raw: &str) -> Option<ModelSlug> {
 
 fn opencode_canonical(provider: &str, raw: &str) -> ModelSlug {
     if raw.contains('/') {
-        ModelSlug(raw.into())
-    } else {
-        ModelSlug(format!("{provider}/{raw}"))
+        return ModelSlug(raw.into());
     }
+    // OpenCode reports older Anthropic models with the date-less `claude-*-4-5`
+    // form (dashes). Route those through the shared claude family map so they
+    // canonicalize to `anthropic/claude-*-4.5` (dot) which is what pricing has.
+    if provider == "anthropic"
+        && let Some(slug) = claude_canonical(raw)
+    {
+        return slug;
+    }
+    ModelSlug(format!("{provider}/{raw}"))
 }
 
 fn pi_canonical(provider: &str, raw: &str) -> ModelSlug {
-    let normalized = normalize_version_hyphens(raw);
-    ModelSlug(format!("{provider}/{normalized}"))
+    let normalized_provider = normalize_pi_provider(provider);
+    // When the (normalized) provider is anthropic, route through the shared
+    // claude family map so `claude-haiku-4-5` becomes `anthropic/claude-haiku-4.5`
+    // (matches what pricing-fallback knows).
+    if normalized_provider == "anthropic"
+        && let Some(slug) = claude_canonical(raw)
+    {
+        return slug;
+    }
+    let normalized_model = normalize_version_hyphens(raw);
+    ModelSlug(format!("{normalized_provider}/{normalized_model}"))
+}
+
+/// Pi sometimes records the *client tool* name (e.g. `google-gemini-cli`,
+/// `openai-codex`) in the `provider` field instead of the underlying vendor.
+/// Map those back to canonical vendor names so the resulting slug matches what
+/// pricing knows.
+fn normalize_pi_provider(provider: &str) -> &str {
+    match provider {
+        "google-gemini-cli" => "google",
+        "openai-codex" => "openai",
+        other => other,
+    }
 }
 
 fn normalize_version_hyphens(raw: &str) -> String {
@@ -306,5 +339,52 @@ mod tests {
     fn openai_gpt_5_4_mini_with_date() {
         let slug = canonical(Source::Codex, "gpt-5.4-mini-2026-03-17", None);
         assert_eq!(slug.as_str(), "gpt-5.4-mini");
+    }
+
+    #[test]
+    fn opencode_anthropic_old_family_normalizes() {
+        // OpenCode emits `claude-opus-4-5` (dashes) for older Anthropic models.
+        // Pricing has `anthropic/claude-opus-4.5` (dot), so we must route the
+        // raw model through claude_canonical when provider is "anthropic".
+        let slug = canonical(Source::OpenCode, "claude-opus-4-5", Some("anthropic"));
+        assert_eq!(slug.as_str(), "anthropic/claude-opus-4.5");
+
+        let slug = canonical(Source::OpenCode, "claude-sonnet-4-5", Some("anthropic"));
+        assert_eq!(slug.as_str(), "anthropic/claude-sonnet-4.5");
+
+        let slug = canonical(Source::OpenCode, "claude-haiku-4-5", Some("anthropic"));
+        assert_eq!(slug.as_str(), "anthropic/claude-haiku-4.5");
+    }
+
+    #[test]
+    fn opencode_unknown_anthropic_falls_back_to_prefix() {
+        // Models not in the claude family map should still produce a slash
+        // slug — falling back to `{provider}/{raw}`.
+        let slug = canonical(Source::OpenCode, "claude-future-9-9", Some("anthropic"));
+        assert_eq!(slug.as_str(), "anthropic/claude-future-9-9");
+    }
+
+    #[test]
+    fn pi_google_gemini_cli_provider_normalizes() {
+        let slug = canonical(
+            Source::Pi,
+            "gemini-3-pro-preview",
+            Some("google-gemini-cli"),
+        );
+        assert_eq!(slug.as_str(), "google/gemini-3-pro-preview");
+    }
+
+    #[test]
+    fn pi_openai_codex_provider_normalizes() {
+        let slug = canonical(Source::Pi, "gpt-5.3-codex", Some("openai-codex"));
+        assert_eq!(slug.as_str(), "openai/gpt-5.3-codex");
+    }
+
+    #[test]
+    fn pi_anthropic_haiku_still_normalizes_no_regression() {
+        // Confirm the haiku-4-5 -> anthropic/claude-haiku-4.5 path still
+        // works after routing pi-anthropic through claude_canonical.
+        let slug = canonical(Source::Pi, "claude-haiku-4-5", Some("anthropic"));
+        assert_eq!(slug.as_str(), "anthropic/claude-haiku-4.5");
     }
 }

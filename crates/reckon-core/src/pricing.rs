@@ -22,6 +22,7 @@ struct LiteLLMEntry {
     cache_read_input_token_cost: Option<f64>,
     cache_creation_input_token_cost: Option<f64>,
     output_cost_per_reasoning_token: Option<f64>,
+    litellm_provider: Option<String>,
 }
 
 /// # Panics
@@ -96,6 +97,20 @@ pub fn load_pricing_from_str(body: &str) -> HashMap<ModelSlug, Pricing> {
                 cache_write_per_token: entry.cache_creation_input_token_cost.unwrap_or(0.0),
                 reasoning_per_token: entry.output_cost_per_reasoning_token,
             };
+
+            // Cross-index bare canonical keys (no '/') under their
+            // `{litellm_provider}/{key}` form too, so readers that emit
+            // provider-prefixed slugs (e.g. opencode's `openai/gpt-5.5`) can
+            // resolve pricing entries that were authored bare.
+            if !canonical.as_str().contains('/')
+                && let Some(provider) = entry.litellm_provider.as_deref()
+            {
+                let normalized = normalize_vendor(provider);
+                if !normalized.is_empty() {
+                    let aliased = ModelSlug::new(format!("{normalized}/{}", canonical.as_str()));
+                    out.insert(aliased, pricing);
+                }
+            }
 
             out.insert(canonical, pricing);
         }
@@ -217,6 +232,10 @@ fn is_region_prefix(prefix: &str) -> bool {
 fn normalize_vendor(vendor: &str) -> &str {
     match vendor {
         "gemini" => "google",
+        // LiteLLM uses `vertex_ai` and many `vertex_ai-*-models` flavours
+        // for Google's hosted Gemini family. From the reader/UI side these
+        // are all "google".
+        v if v == "vertex_ai" || v.starts_with("vertex_ai-") => "google",
         _ => vendor,
     }
 }
@@ -408,6 +427,43 @@ mod tests {
                 "fallback model {model} not in merged pricing"
             );
         }
+    }
+
+    #[test]
+    fn load_pricing_cross_indexes_bare_keys_by_provider() {
+        // Bare canonical keys should be inserted both under their bare slug
+        // and under `{litellm_provider}/{key}` so readers emitting either
+        // shape can resolve pricing.
+        let body = r#"{
+            "gpt-5.5": {
+                "input_cost_per_token": 0.000005,
+                "output_cost_per_token": 0.00004,
+                "litellm_provider": "openai"
+            },
+            "gemini-3-pro-preview": {
+                "input_cost_per_token": 0.000002,
+                "output_cost_per_token": 0.00001,
+                "litellm_provider": "vertex_ai-language-models"
+            }
+        }"#;
+        let pricing = load_pricing_from_str(body);
+
+        assert!(
+            pricing.contains_key(&ModelSlug::new("gpt-5.5")),
+            "bare key gpt-5.5 must be present"
+        );
+        assert!(
+            pricing.contains_key(&ModelSlug::new("openai/gpt-5.5")),
+            "provider-prefixed alias openai/gpt-5.5 must be present"
+        );
+        assert!(
+            pricing.contains_key(&ModelSlug::new("gemini-3-pro-preview")),
+            "bare key gemini-3-pro-preview must be present"
+        );
+        assert!(
+            pricing.contains_key(&ModelSlug::new("google/gemini-3-pro-preview")),
+            "normalized google/gemini-3-pro-preview alias must be present (vertex_ai-* -> google)"
+        );
     }
 
     #[test]
