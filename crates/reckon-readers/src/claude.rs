@@ -198,6 +198,13 @@ async fn scan_jsonl_file(
             continue;
         };
 
+        // Skip auto-compaction subagent markers. Claude Code writes
+        // `"model": "<synthetic>"` for compaction-runner sessions; usage
+        // is always all-zero and the row is pure noise in the output.
+        if raw_model == "<synthetic>" {
+            continue;
+        }
+
         let Some(ts_secs) = parse_iso8601_to_epoch(&timestamp) else {
             continue;
         };

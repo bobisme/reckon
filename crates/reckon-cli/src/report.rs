@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
 
-use reckon_core::{ModelSlug, Pricing, Source, TokenCounts, UsageEvent, YearMonth};
+use reckon_core::{cost, ModelSlug, Pricing, Source, TokenCounts, UsageEvent, YearMonth};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dimension {
@@ -82,6 +82,38 @@ pub fn aggregate(events: &[UsageEvent], by: &BySpec) -> BTreeMap<AggregateKey, T
                 .then(|| event.project.clone().unwrap_or_default()),
         };
         *map.entry(key).or_default() += event.tokens;
+    }
+    map
+}
+
+/// Aggregate the per-row USD cost the same way `aggregate` sums tokens.
+///
+/// Cost depends on the model, so it must be computed per-event before the
+/// model dimension is dropped from the aggregation key. Without this, any
+/// `--by` spec that omits `model` (including the compact default with no
+/// breakdown) would render every row as `$0.00`.
+pub fn aggregate_cost(
+    events: &[UsageEvent],
+    by: &BySpec,
+    pricing: &HashMap<ModelSlug, Pricing>,
+) -> BTreeMap<AggregateKey, f64> {
+    let mut seen = HashSet::new();
+    let mut map: BTreeMap<AggregateKey, f64> = BTreeMap::new();
+    for event in events {
+        if !seen.insert(event.dedup_key.clone()) {
+            continue;
+        }
+        let key = AggregateKey {
+            month: event.month,
+            source: by.has(&Dimension::Source).then_some(event.source),
+            model: by.has(&Dimension::Model).then_some(event.model.clone()),
+            provider: by.has(&Dimension::Provider).then(|| event.provider.clone()),
+            project: by
+                .has(&Dimension::Project)
+                .then(|| event.project.clone().unwrap_or_default()),
+        };
+        let c = pricing.get(&event.model).map_or(0.0, |p| cost(&event.tokens, p));
+        *map.entry(key).or_default() += c;
     }
     map
 }

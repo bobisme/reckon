@@ -62,12 +62,13 @@ struct Cli {
     #[arg(long, conflicts_with = "color")]
     no_color: bool,
 
-    /// Comma-separated breakdown dimensions: source, model, provider, project
+    /// Comma-separated breakdown dimensions: source, model, provider, project.
     ///
-    /// Controls which columns appear in the output. Default is "source,model".
-    /// Month is always implicit.
-    #[arg(long, default_value = "source,model", value_parser = parse_by_spec)]
-    by: BySpec,
+    /// Controls which columns appear in the output. Month is always implicit.
+    /// If omitted: defaults to no breakdown (a compact Month/Total/Cost table)
+    /// unless `--source` is passed, in which case it defaults to "source,model".
+    #[arg(long, value_parser = parse_by_spec)]
+    by: Option<BySpec>,
 
     /// Show only a single month (YYYY-MM)
     #[arg(long, conflicts_with_all = ["since", "until"])]
@@ -359,6 +360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             });
         }
 
+        let requested_sources_clone: Vec<Source> = requested_sources.clone();
         let mut readers: Vec<Box<dyn Reader>> = Vec::new();
         for source in requested_sources {
             match source {
@@ -375,6 +377,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         rebucket_events(&mut events, &tz);
 
+        // When --source is explicit, restrict the display to those sources
+        // too. Without this, cache-replayed events from prior full scans of
+        // other sources would still appear, defeating the filter.
+        if args.source.is_some() {
+            let allowed: std::collections::HashSet<Source> =
+                requested_sources_clone.iter().copied().collect();
+            events.retain(|e| allowed.contains(&e.source));
+        }
+
         if let Some(ref filter) = month_filter {
             events.retain(|e| filter.matches(e.month));
         }
@@ -386,12 +397,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return;
         }
 
-        let aggregated = report::aggregate(&events, &args.by);
+        // `--by` defaults to the full breakdown only when the user is also
+        // filtering by source (their intent is "show me what's inside that
+        // source"). Otherwise default to no breakdown — a compact monthly
+        // summary table — which the user can override explicitly with `--by`.
+        let by = args.by.clone().unwrap_or_else(|| {
+            if args.source.is_some() {
+                report::BySpec::default()
+            } else {
+                report::BySpec(Vec::new())
+            }
+        });
+
+        let aggregated = report::aggregate(&events, &by);
+        let costs = report::aggregate_cost(&events, &by, &pricing);
         let unknown_models = report::unknown_model_slugs(&aggregated, &pricing);
         if args.json {
-            render::print_json(&events, &pricing, balance.as_ref(), &args.by);
+            render::print_json(&events, &pricing, balance.as_ref(), &by);
         } else {
-            render::print_table(&aggregated, &pricing, balance.as_ref(), use_color, &args.by, args.all_columns);
+            render::print_table(&aggregated, &costs, balance.as_ref(), use_color, &by, args.all_columns);
         }
 
         if !unknown_models.is_empty() {

@@ -78,7 +78,7 @@ fn dim_table_lines(s: &str) -> String {
 
 pub fn format_table(
     aggregated: &BTreeMap<AggregateKey, TokenCounts>,
-    pricing: &HashMap<ModelSlug, Pricing>,
+    costs: &BTreeMap<AggregateKey, f64>,
     balance: Option<&OpenRouterSummary>,
     by: &BySpec,
     use_color: bool,
@@ -112,6 +112,10 @@ pub fn format_table(
     let mut builder = Builder::default();
     builder.push_record(header);
 
+    // When `by` has no dimensions, each month has exactly one aggregate row,
+    // and printing a separate TOTAL line would just duplicate it.
+    let suppress_total_row = num_dim_cols == 0;
+
     for month in months.iter().rev() {
         let mut month_entries: Vec<_> = aggregated
             .iter()
@@ -120,24 +124,16 @@ pub fn format_table(
         month_entries.sort_by_key(|(key, _)| (*key).clone());
 
         for (key, tokens) in &month_entries {
-            let model_cost = key
-                .model
-                .as_ref()
-                .and_then(|m| pricing.get(m))
-                .map_or(0.0, |p| cost(tokens, p));
-            builder.push_record(build_data_row(by, *month, key, tokens, model_cost, use_color, all_columns));
+            let row_cost = *costs.get(key).unwrap_or(&0.0);
+            builder.push_record(build_data_row(by, *month, key, tokens, row_cost, use_color, all_columns));
+        }
+
+        if suppress_total_row {
+            continue;
         }
 
         let total_tokens = &totals[month];
-        let total_cost: f64 = month_entries
-            .iter()
-            .map(|(key, tokens)| {
-                key.model
-                    .as_ref()
-                    .and_then(|m| pricing.get(m))
-                    .map_or(0.0, |p| cost(tokens, p))
-            })
-            .sum();
+        let total_cost: f64 = month_entries.iter().map(|(k, _)| *costs.get(*k).unwrap_or(&0.0)).sum();
         builder.push_record(build_total_row(
             *month,
             num_dim_cols,
@@ -166,7 +162,7 @@ pub fn format_table(
 
 pub fn print_table(
     aggregated: &BTreeMap<AggregateKey, TokenCounts>,
-    pricing: &HashMap<ModelSlug, Pricing>,
+    costs: &BTreeMap<AggregateKey, f64>,
     balance: Option<&OpenRouterSummary>,
     use_color: bool,
     by: &BySpec,
@@ -175,7 +171,7 @@ pub fn print_table(
     // Color is now applied per-cell inside format_table (TOTAL rows only),
     // not as an outer wrap. Print the table verbatim and colorize the
     // balance line separately so it keeps its own (green) accent.
-    let table_str = format_table(aggregated, pricing, None, by, use_color, all_columns);
+    let table_str = format_table(aggregated, costs, None, by, use_color, all_columns);
     println!("{table_str}");
     if let Some(summary) = balance {
         println!(
@@ -445,7 +441,7 @@ pub fn print_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::aggregate;
+    use crate::report::{aggregate, aggregate_cost};
 
     #[test]
     fn fmt_thousands_cases() {
@@ -596,7 +592,8 @@ mod tests {
         let pricing = fixture_pricing();
         let by = BySpec::default();
         let aggregated = aggregate(&events, &by);
-        let out = format_table(&aggregated, &pricing, None, &by, false, false);
+        let costs = aggregate_cost(&events, &by, &pricing);
+        let out = format_table(&aggregated, &costs, None, &by, false, false);
         insta::assert_snapshot!(out);
     }
 
@@ -606,12 +603,13 @@ mod tests {
         let pricing = fixture_pricing();
         let by = BySpec::default();
         let aggregated = aggregate(&events, &by);
+        let costs = aggregate_cost(&events, &by, &pricing);
         let balance = OpenRouterSummary {
             total_credits: 100.0,
             total_usage: 25.50,
             fetched_at: "2026-05-11T12:00:00Z".into(),
         };
-        let out = format_table(&aggregated, &pricing, Some(&balance), &by, false, false);
+        let out = format_table(&aggregated, &costs, Some(&balance), &by, false, false);
         insta::assert_snapshot!(out);
     }
 
@@ -621,7 +619,8 @@ mod tests {
         let pricing = fixture_pricing();
         let by = BySpec::parse("source").expect("valid");
         let aggregated = aggregate(&events, &by);
-        let out = format_table(&aggregated, &pricing, None, &by, false, false);
+        let costs = aggregate_cost(&events, &by, &pricing);
+        let out = format_table(&aggregated, &costs, None, &by, false, false);
         insta::assert_snapshot!(out);
     }
 
@@ -631,7 +630,19 @@ mod tests {
         let pricing = fixture_pricing();
         let by = BySpec::default();
         let aggregated = aggregate(&events, &by);
-        let out = format_table(&aggregated, &pricing, None, &by, false, true);
+        let costs = aggregate_cost(&events, &by, &pricing);
+        let out = format_table(&aggregated, &costs, None, &by, false, true);
+        insta::assert_snapshot!(out);
+    }
+
+    #[test]
+    fn snapshot_table_no_breakdown() {
+        let events = fixture_events();
+        let pricing = fixture_pricing();
+        let by = BySpec(Vec::new());
+        let aggregated = aggregate(&events, &by);
+        let costs = aggregate_cost(&events, &by, &pricing);
+        let out = format_table(&aggregated, &costs, None, &by, false, false);
         insta::assert_snapshot!(out);
     }
 
