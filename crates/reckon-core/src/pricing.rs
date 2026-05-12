@@ -108,15 +108,44 @@ pub fn load_pricing_from_str(body: &str) -> HashMap<ModelSlug, Pricing> {
                 let normalized = normalize_vendor(provider);
                 if !normalized.is_empty() {
                     let aliased = ModelSlug::new(format!("{normalized}/{}", canonical.as_str()));
-                    out.insert(aliased, pricing);
+                    upsert_pricing(&mut out, aliased, pricing);
                 }
             }
 
-            out.insert(canonical, pricing);
+            upsert_pricing(&mut out, canonical, pricing);
         }
     }
 
     out
+}
+
+/// Insert pricing, preferring entries with cache pricing fields when keys
+/// collide. Without this, a sparse mirror like `gmi/anthropic/claude-sonnet-4.5`
+/// (no cache_read/cache_creation fields) can non-deterministically overwrite
+/// a complete mirror like `openrouter/anthropic/claude-sonnet-4.5` because
+/// `HashMap` iteration order isn't stable, dropping ~95% of the model's true
+/// cost.
+fn upsert_pricing(out: &mut HashMap<ModelSlug, Pricing>, key: ModelSlug, candidate: Pricing) {
+    match out.get(&key) {
+        Some(existing) if completeness(existing) >= completeness(&candidate) => {}
+        _ => {
+            out.insert(key, candidate);
+        }
+    }
+}
+
+const fn completeness(p: &Pricing) -> u8 {
+    let mut score = 0u8;
+    if p.cache_read_per_token > 0.0 {
+        score += 1;
+    }
+    if p.cache_write_per_token > 0.0 {
+        score += 1;
+    }
+    if p.reasoning_per_token.is_some() {
+        score += 1;
+    }
+    score
 }
 
 #[must_use]
