@@ -269,7 +269,7 @@ pub(crate) fn plan_jsonl_scan(
 
 pub(crate) fn read_jsonl_prefix(path: &Path, end_offset: i64) -> io::Result<String> {
     #[cfg(test)]
-    JSONL_OPEN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    bump_jsonl_open_count();
 
     let file = File::open(path)?;
     let mut bytes = Vec::new();
@@ -319,7 +319,7 @@ pub(crate) fn civil_to_epoch(y: i32, m: u32, d: u32, h: u32, min: u32, sec: u32)
 
 pub(crate) fn read_jsonl_from_offset(path: &Path, start_offset: i64) -> io::Result<String> {
     #[cfg(test)]
-    JSONL_OPEN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    bump_jsonl_open_count();
 
     if start_offset == 0 {
         return std::fs::read_to_string(path);
@@ -581,17 +581,29 @@ async fn run_readers_inner(
     events
 }
 
+// Thread-local, not a process-global atomic: each test runs its readers on its
+// own thread (the `LabRuntime` drives the future to quiescence synchronously on
+// the calling test thread), so a thread-local counter is naturally isolated.
+// A shared global would be corrupted by any other test opening a JSONL file
+// concurrently, making count assertions flaky under the parallel test runner.
 #[cfg(test)]
-static JSONL_OPEN_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static JSONL_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn bump_jsonl_open_count() {
+    JSONL_OPEN_COUNT.with(|c| c.set(c.get() + 1));
+}
 
 #[cfg(test)]
 pub(crate) fn reset_jsonl_open_count() {
-    JSONL_OPEN_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    JSONL_OPEN_COUNT.with(|c| c.set(0));
 }
 
 #[cfg(test)]
 pub(crate) fn jsonl_open_count() -> usize {
-    JSONL_OPEN_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+    JSONL_OPEN_COUNT.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]
