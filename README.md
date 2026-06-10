@@ -39,6 +39,7 @@ reckon --month 2026-05          # just one month
 reckon --since 2026-01          # year to date
 reckon --source claude,codex    # restrict sources
 reckon --json | jq              # machine-readable
+reckon refresh                  # force-refresh pricing now (don't wait for the weekly auto-refresh)
 ```
 
 Example output:
@@ -114,8 +115,15 @@ own discounts.
 - **After 7 days**: a background fetch refreshes
   `~/.cache/reckon/pricing.json`. The refresh never blocks rendering;
   if it fails, the previous file (or the vendored fallback) is used.
+  Because it runs in the background, freshly-fetched prices first appear
+  on the *next* run.
+- **`reckon refresh`**: forces a synchronous refresh now — fetches,
+  overwrites the cache, and reports how many models were written. Use
+  this when you don't want to wait for the weekly auto-refresh or the
+  next-run delay.
 - **`--offline`**: disables the refresh entirely. New models may price
-  at $0 with a warning.
+  at $0 with a warning. (`reckon refresh --offline` is rejected, since
+  refreshing requires the network.)
 - **`cargo xtask vendor-pricing`**: re-snapshots the vendored fallback
   pre-release.
 

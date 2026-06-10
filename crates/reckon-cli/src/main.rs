@@ -9,7 +9,7 @@ use std::io::{self, IsTerminal};
 use std::path::PathBuf;
 
 use asupersync::Cx;
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use reckon_core::{
     is_pricing_cache_stale, load_pricing_fallback, load_pricing_from_cache, resolve_tz, ModelSlug,
     Source, YearMonth,
@@ -38,12 +38,16 @@ use report::BySpec;
 // collapsing them into enums would obscure the flag surface, not clarify it.
 #[allow(clippy::struct_excessive_bools)]
 struct Cli {
+    /// Maintenance subcommands. Omit to print the usage report (the default).
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Disable automatic pricing refresh from `LiteLLM`
     ///
     /// When set, pricing loads from ~/.cache/reckon/pricing.json if present,
     /// otherwise falls back to the vendored snapshot. No network requests are made.
     /// Note: newer models may be priced at $0 if not in cache or fallback.
-    #[arg(long)]
+    #[arg(long, global = true)]
     offline: bool,
 
     /// Output as JSON
@@ -97,6 +101,16 @@ struct Cli {
     /// Reasoning). Default hides them and shows only the Total column.
     #[arg(long)]
     all_columns: bool,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Force-refresh the `LiteLLM` pricing cache now, ignoring its staleness.
+    ///
+    /// Fetches synchronously, overwrites ~/.cache/reckon/pricing.json, and
+    /// prints how many models were written. Unlike the report path's
+    /// background refresh, the new prices are on disk before this returns.
+    Refresh,
 }
 
 fn parse_by_spec(s: &str) -> Result<BySpec, String> {
@@ -177,6 +191,21 @@ fn pricing_cache_path() -> PathBuf {
 
 fn home_dir() -> PathBuf {
     env::var("HOME").map_or_else(|_| PathBuf::from("."), PathBuf::from)
+}
+
+/// Synchronously fetch `LiteLLM` pricing and overwrite the cache, then report the
+/// model count. Refreshing is inherently online, so `--offline` is rejected
+/// rather than silently no-op'd.
+fn run_refresh(offline: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if offline {
+        eprintln!("error: `reckon refresh` needs network access; drop --offline");
+        std::process::exit(2);
+    }
+
+    let path = pricing_cache_path();
+    let count = pricing_refresh::fetch_and_cache_pricing(&path)?;
+    println!("Refreshed pricing: {count} models -> {}", path.display());
+    Ok(())
 }
 
 fn source_is_available(source: Source) -> bool {
@@ -289,6 +318,10 @@ fn color_warning(text: &str, use_color: bool) -> String {
 #[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
+
+    if matches!(args.command, Some(Command::Refresh)) {
+        return run_refresh(args.offline);
+    }
 
     let month_filter = match resolve_month_filter(args.month, args.since, args.until) {
         Ok(f) => f,
