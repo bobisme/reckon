@@ -181,7 +181,7 @@ pub fn print_table(
     }
 }
 
-fn token_total(tokens: &TokenCounts) -> u64 {
+const fn token_total(tokens: &TokenCounts) -> u64 {
     tokens.input
         .saturating_add(tokens.output)
         .saturating_add(tokens.cache_read)
@@ -290,12 +290,14 @@ fn aggregate_for_json(
     BTreeMap<AggregateKey, JsonAggregate>,
     BTreeMap<YearMonth, TokenCounts>,
 ) {
-    let mut seen = HashSet::new();
+    // Dedup by (source, dedup_key) to match the cache PRIMARY KEY — two
+    // sources can legitimately emit the same dedup_key string.
+    let mut seen: HashSet<(Source, &str)> = HashSet::new();
     let mut aggregated: BTreeMap<AggregateKey, JsonAggregate> = BTreeMap::new();
     let mut totals: BTreeMap<YearMonth, TokenCounts> = BTreeMap::new();
 
     for event in events {
-        if !seen.insert(event.dedup_key.clone()) {
+        if !seen.insert((event.source, event.dedup_key.as_str())) {
             continue;
         }
 

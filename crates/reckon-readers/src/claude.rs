@@ -83,9 +83,7 @@ impl Reader for ClaudeReader {
             let project_name = dir_entry.file_name().to_string_lossy().into_owned();
             let project = decode_project_name(&project_name);
 
-            let Ok(jsonl_files) = find_jsonl_files(&dir_path) else {
-                continue;
-            };
+            let jsonl_files = find_jsonl_files(&dir_path);
 
             for file_path in jsonl_files {
                 match scan_jsonl_file(&file_path, &project, cx, sink).await {
@@ -115,10 +113,10 @@ impl Reader for ClaudeReader {
     }
 }
 
-fn find_jsonl_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
+fn find_jsonl_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_jsonl_recursive(dir, &mut files);
-    Ok(files)
+    files
 }
 
 fn collect_jsonl_recursive(dir: &Path, files: &mut Vec<PathBuf>) {

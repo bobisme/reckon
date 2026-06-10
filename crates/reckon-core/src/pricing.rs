@@ -121,7 +121,7 @@ pub fn load_pricing_from_str(body: &str) -> HashMap<ModelSlug, Pricing> {
 
 /// Insert pricing, preferring entries with cache pricing fields when keys
 /// collide. Without this, a sparse mirror like `gmi/anthropic/claude-sonnet-4.5`
-/// (no cache_read/cache_creation fields) can non-deterministically overwrite
+/// (no `cache_read`/`cache_creation` fields) can non-deterministically overwrite
 /// a complete mirror like `openrouter/anthropic/claude-sonnet-4.5` because
 /// `HashMap` iteration order isn't stable, dropping ~95% of the model's true
 /// cost.

@@ -66,10 +66,14 @@ pub struct AggregateKey {
 }
 
 pub fn aggregate(events: &[UsageEvent], by: &BySpec) -> BTreeMap<AggregateKey, TokenCounts> {
-    let mut seen = HashSet::new();
+    // Dedup by (source, dedup_key) to match the cache's PRIMARY KEY. Two
+    // sources can legitimately emit the same dedup_key (e.g., a Claude
+    // request_id colliding with an OpenCode message id); keying on
+    // dedup_key alone would silently drop one of them.
+    let mut seen: HashSet<(Source, &str)> = HashSet::new();
     let mut map: BTreeMap<AggregateKey, TokenCounts> = BTreeMap::new();
     for event in events {
-        if !seen.insert(event.dedup_key.clone()) {
+        if !seen.insert((event.source, event.dedup_key.as_str())) {
             continue;
         }
         let key = AggregateKey {
@@ -97,10 +101,10 @@ pub fn aggregate_cost(
     by: &BySpec,
     pricing: &HashMap<ModelSlug, Pricing>,
 ) -> BTreeMap<AggregateKey, f64> {
-    let mut seen = HashSet::new();
+    let mut seen: HashSet<(Source, &str)> = HashSet::new();
     let mut map: BTreeMap<AggregateKey, f64> = BTreeMap::new();
     for event in events {
-        if !seen.insert(event.dedup_key.clone()) {
+        if !seen.insert((event.source, event.dedup_key.as_str())) {
             continue;
         }
         let key = AggregateKey {
@@ -306,5 +310,72 @@ mod tests {
         assert!(by.has(&Dimension::Model));
         assert!(by.has(&Dimension::Project));
         assert!(!by.has(&Dimension::Provider));
+    }
+
+    /// Two events from different sources with the same `dedup_key` must
+    /// both survive aggregation. The cache schema enforces uniqueness by
+    /// `(source, dedup_key)`, so an `aggregate` that keyed only on
+    /// `dedup_key` would silently drop one of them.
+    #[test]
+    fn aggregate_keeps_both_sources_when_dedup_keys_collide() {
+        let events = vec![
+            event(5, Source::Claude, "anthropic/claude-opus-4.7", 100, "shared-key"),
+            event(5, Source::OpenCode, "anthropic/claude-opus-4.7", 200, "shared-key"),
+        ];
+        let agg = aggregate(&events, &default_by());
+        assert_eq!(
+            agg[&key(5, Source::Claude, "anthropic/claude-opus-4.7")].input,
+            100,
+            "Claude event with shared dedup_key must be preserved"
+        );
+        assert_eq!(
+            agg[&key(5, Source::OpenCode, "anthropic/claude-opus-4.7")].input,
+            200,
+            "OpenCode event with shared dedup_key must be preserved"
+        );
+    }
+
+    /// Same dedup_key emitted twice by the *same* source must still
+    /// collapse to one row.
+    #[test]
+    fn aggregate_still_dedups_same_source_repeats() {
+        let events = vec![
+            event(5, Source::Claude, "anthropic/claude-opus-4.7", 100, "req-x"),
+            event(5, Source::Claude, "anthropic/claude-opus-4.7", 100, "req-x"),
+        ];
+        let agg = aggregate(&events, &default_by());
+        assert_eq!(
+            agg[&key(5, Source::Claude, "anthropic/claude-opus-4.7")].input,
+            100,
+            "duplicate within a source must collapse"
+        );
+    }
+
+    #[test]
+    fn aggregate_cost_keeps_both_sources_when_dedup_keys_collide() {
+        let mut pricing = HashMap::new();
+        pricing.insert(
+            ModelSlug::new("anthropic/claude-opus-4.7"),
+            Pricing {
+                input_per_token: 0.01,
+                output_per_token: 0.0,
+                cache_read_per_token: 0.0,
+                cache_write_per_token: 0.0,
+                reasoning_per_token: None,
+            },
+        );
+        let events = vec![
+            event(5, Source::Claude, "anthropic/claude-opus-4.7", 100, "shared-key"),
+            event(5, Source::OpenCode, "anthropic/claude-opus-4.7", 200, "shared-key"),
+        ];
+        let costs = aggregate_cost(&events, &default_by(), &pricing);
+        assert!(
+            (costs[&key(5, Source::Claude, "anthropic/claude-opus-4.7")] - 1.0).abs() < 1e-9,
+            "Claude cost must reflect 100 * 0.01"
+        );
+        assert!(
+            (costs[&key(5, Source::OpenCode, "anthropic/claude-opus-4.7")] - 2.0).abs() < 1e-9,
+            "OpenCode cost must reflect 200 * 0.01"
+        );
     }
 }

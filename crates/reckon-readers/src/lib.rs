@@ -530,17 +530,19 @@ pub async fn run_readers_with_cache(
     let fresh = run_readers_inner(cx, readers, sink, &mut rx).await;
 
     // Replay persisted events from prior runs so totals don't decay to deltas.
-    // Fresh events from this scan win on dedup_key collision (they may carry
-    // corrected fields). The cache uses INSERT OR REPLACE keyed by
-    // (source, dedup_key), but we re-merge here so the returned Vec is
-    // consistent regardless of cache write ordering.
+    // Fresh events from this scan win on (source, dedup_key) collision (they
+    // may carry corrected fields). The cache uses INSERT OR REPLACE keyed by
+    // (source, dedup_key); we mirror that key shape here so cross-source
+    // dedup_key collisions (e.g., a Claude request_id matching an OpenCode
+    // message id) don't cause one event to overwrite the other.
     let persisted = load_events(&open_cache(cache_path));
-    let mut merged: HashMap<String, UsageEvent> = HashMap::with_capacity(persisted.len() + fresh.len());
+    let mut merged: HashMap<(Source, String), UsageEvent> =
+        HashMap::with_capacity(persisted.len() + fresh.len());
     for event in persisted {
-        merged.insert(event.dedup_key.clone(), event);
+        merged.insert((event.source, event.dedup_key.clone()), event);
     }
     for event in fresh {
-        merged.insert(event.dedup_key.clone(), event);
+        merged.insert((event.source, event.dedup_key.clone()), event);
     }
     merged.into_values().collect()
 }
@@ -1155,6 +1157,101 @@ mod tests {
             .find(|e| e.dedup_key == "or:ep-old")
             .expect("old key replayed");
         assert_eq!(old.known_cost_usd, Some(0.1));
+    }
+
+    /// Two events from different sources that happen to share a `dedup_key`
+    /// (e.g., a Claude request_id colliding with an OpenCode message id)
+    /// must both survive `run_readers_with_cache`. The cache uses
+    /// `(source, dedup_key)` as its PRIMARY KEY, so the in-memory merge
+    /// must mirror that — using `dedup_key` alone would let one event
+    /// overwrite the other.
+    #[test]
+    fn cached_run_keeps_cross_source_collisions() {
+        let cache_dir = TempDir::new().expect("temp cache dir");
+        let cache_path = cache_dir.path().join("index.sqlite");
+
+        // Persist a Claude event under `shared-key` so it lives in the cache
+        // for the next run.
+        let (_runtime, _) = run_on_lab(81, {
+            let cache_path = cache_path.clone();
+            move |cx| {
+                Box::pin(async move {
+                    let mut event = event(Source::Claude, 0);
+                    event.dedup_key = "shared-key".into();
+                    event.tokens.input = 111;
+
+                    let (tx, mut rx) = mpsc::channel(Sink::CAPACITY);
+                    let sink = Sink::new_cached(tx, &cache_path);
+                    sink.send(&cx, event).await.expect("send");
+                    sink.close();
+                    while rx.recv(&cx).await.is_ok() {}
+                })
+            }
+        });
+
+        // A fresh OpenCode reader emits an event with the same dedup_key.
+        // Both rows must end up in the merged Vec returned by
+        // `run_readers_with_cache`.
+        #[derive(Debug)]
+        struct CollidingOpenCodeReader;
+        #[async_trait]
+        impl Reader for CollidingOpenCodeReader {
+            fn source(&self) -> Source {
+                Source::OpenCode
+            }
+            async fn scan(&self, cx: &Cx, sink: &Sink) -> Outcome<(), ReaderError> {
+                let event = UsageEvent {
+                    source: Source::OpenCode,
+                    month: YearMonth::new(2026, 5),
+                    timestamp_secs: 1_777_777_777,
+                    model: ModelSlug::new("anthropic/claude-opus-4.7"),
+                    provider: "anthropic".into(),
+                    project: None,
+                    tokens: TokenCounts {
+                        input: 222,
+                        ..TokenCounts::default()
+                    },
+                    dedup_key: "shared-key".into(),
+                    known_cost_usd: None,
+                    byok_usage_inference: None,
+                };
+                let _ = sink.send(cx, event).await;
+                Outcome::ok(())
+            }
+            fn cache_strategy(&self) -> CacheStrategy {
+                CacheStrategy::SqlCursor
+            }
+        }
+
+        let (_runtime, events) = run_on_lab(82, {
+            let cache_path = cache_path.clone();
+            move |cx| {
+                Box::pin(async move {
+                    run_readers_with_cache(
+                        &cx,
+                        vec![Box::new(CollidingOpenCodeReader)],
+                        &cache_path,
+                    )
+                    .await
+                })
+            }
+        });
+
+        assert_eq!(
+            events.len(),
+            2,
+            "both events with the same dedup_key but different sources must survive merge"
+        );
+        let claude = events
+            .iter()
+            .find(|e| e.source == Source::Claude && e.dedup_key == "shared-key")
+            .expect("Claude event with shared dedup_key");
+        assert_eq!(claude.tokens.input, 111);
+        let opencode = events
+            .iter()
+            .find(|e| e.source == Source::OpenCode && e.dedup_key == "shared-key")
+            .expect("OpenCode event with shared dedup_key");
+        assert_eq!(opencode.tokens.input, 222);
     }
 
     #[test]

@@ -65,7 +65,7 @@ struct MessageRow {
     known_cost_usd: Option<f64>,
 }
 
-/// JSON blob shape used by both the SQLite `data` column and the legacy
+/// JSON blob shape used by both the `SQLite` `data` column and the legacy
 /// file-based storage. Only fields we care about are listed.
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -163,7 +163,7 @@ const fn i64_to_u64(v: i64) -> u64 {
     if v < 0 { 0 } else { v as u64 }
 }
 
-fn message_data_to_tokens(data: &MessageData) -> TokenCounts {
+const fn message_data_to_tokens(data: &MessageData) -> TokenCounts {
     TokenCounts {
         input: i64_to_u64(data.tokens.input),
         output: i64_to_u64(data.tokens.output),
@@ -192,22 +192,19 @@ fn read_page(conn: &Connection, after_created: i64) -> rusqlite::Result<Vec<Mess
         // rather than abort the scan — keep the cursor moving so callers
         // still see good rows. We surface this through a None push so the
         // caller can advance `cursor` past the malformed timestamp.
-        let data: MessageData = match serde_json::from_str(&data_json) {
-            Ok(d) => d,
-            Err(_) => {
-                // Yield a placeholder row with zero tokens so the cursor
-                // advances and the row is then filtered out downstream.
-                page.push(MessageRow {
-                    id,
-                    tokens: TokenCounts::default(),
-                    model_id: String::new(),
-                    provider_id: String::new(),
-                    created_ms,
-                    project: None,
-                    known_cost_usd: None,
-                });
-                continue;
-            }
+        let Ok(data): Result<MessageData, _> = serde_json::from_str(&data_json) else {
+            // Yield a placeholder row with zero tokens so the cursor
+            // advances and the row is then filtered out downstream.
+            page.push(MessageRow {
+                id,
+                tokens: TokenCounts::default(),
+                model_id: String::new(),
+                provider_id: String::new(),
+                created_ms,
+                project: None,
+                known_cost_usd: None,
+            });
+            continue;
         };
 
         // Only assistant messages carry token usage in OpenCode.

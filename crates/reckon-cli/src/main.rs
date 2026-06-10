@@ -34,6 +34,9 @@ use report::BySpec;
 #[command(name = "reckon")]
 #[command(about = "Monthly AI usage tracker with unsubsidized cost breakdown")]
 #[command(long_about = None)]
+// These bools are independent CLI flags parsed by clap, not a state machine;
+// collapsing them into enums would obscure the flag surface, not clarify it.
+#[allow(clippy::struct_excessive_bools)]
 struct Cli {
     /// Disable automatic pricing refresh from `LiteLLM`
     ///
@@ -280,6 +283,10 @@ fn color_warning(text: &str, use_color: bool) -> String {
     colorize(text, ANSI_YELLOW, use_color)
 }
 
+// Length is dominated by the inline runtime-setup + reader-wiring async block;
+// it reads as one linear pipeline, so splitting it would add indirection
+// without improving clarity.
+#[allow(clippy::too_many_lines)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Cli::parse();
 
