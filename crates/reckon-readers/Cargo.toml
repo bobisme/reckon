@@ -7,10 +7,13 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-asupersync = { version = "0.2", features = ["proc-macros", "tls-webpki-roots"] }
+asupersync = { version = "0.2", features = ["proc-macros", "tls-native-roots", "tls-webpki-roots"] }
 async-trait = "0.1"
 futures = "0.3"
-minreq = { version = "2", features = ["https"] }
+# https-rustls-probe adds OS-native roots (rustls-native-certs) on top of the
+# bundled webpki roots, so HTTPS works behind TLS-intercepting proxies (e.g.
+# Netskope) whose CA lives only in the system trust store. See bn-ud1.
+minreq = { version = "2", features = ["https", "https-rustls-probe"] }
 reckon-core = { path = "../reckon-core" }
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }

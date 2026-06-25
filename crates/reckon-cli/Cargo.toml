@@ -17,9 +17,12 @@ insta = { version = "1", features = ["json"] }
 [dependencies]
 reckon-core = { path = "../reckon-core" }
 reckon-readers = { path = "../reckon-readers" }
-asupersync = { version = "0.2", features = ["tls", "tls-webpki-roots", "proc-macros"] }
+asupersync = { version = "0.2", features = ["tls", "tls-native-roots", "tls-webpki-roots", "proc-macros"] }
 tabled = { version = "0.18", features = ["ansi"] }
-minreq = { version = "2", features = ["https"] }
+# https-rustls-probe adds OS-native roots (rustls-native-certs) on top of the
+# bundled webpki roots, so HTTPS works behind TLS-intercepting proxies (e.g.
+# Netskope) whose CA lives only in the system trust store. See bn-ud1.
+minreq = { version = "2", features = ["https", "https-rustls-probe"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
